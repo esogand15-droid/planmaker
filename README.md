@@ -9,7 +9,7 @@
 |---|---|
 | Template Version | `rotbeland-weekly-v1` |
 | Renderer Version | `html-chromium-1.0.0` (اصلی) · `pillow-1.0.0` (fallback) |
-| Tests | **141 passed** (Renderer 26 · Bot Flow 13 · Security 36 · Deployment 19 · UX 47) |
+| Tests | **207 passed** (Renderer 26 · Bot Flow 13 · Security 36 · Deployment 19 · UX 113) |
 | Stack | Python 3.12 · aiogram 3 · SQLAlchemy 2 async · PostgreSQL · Alembic · Pillow/libraqm · Playwright |
 
 ---
@@ -353,6 +353,7 @@ python -m tools.smoke_test --send-to 12345 # + ارسال نمونه به یک �
 | `ModuleNotFoundError: No module named 'psycopg2'` | نسخه‌های قبل از v1.0.1؛ `migrations/env.py` باید `DATABASE_URL` را به `postgresql+asyncpg://` تبدیل کند. در v1.0.1 رفع شده است |
 | `database unreachable after N attempts` | `DATABASE_URL` یا دسترسی شبکه؛ `DB_CONNECT_RETRIES` را بالا ببرید |
 | هشدار «متن بیش از ظرفیت سلول» | متن فعالیت را کوتاه‌تر کنید؛ سیستم عمداً فونت را بی‌نهایت کوچک نمی‌کند |
+| دکمه‌ای در منو کار نمی‌کند و ساعت می‌چرخد | در v1.0.2 رفع شد: هر callback بی‌صاحب پاسخ می‌گیرد و در لاگ سرور با `unhandled callback data=…` ثبت می‌شود |
 | دانش‌آموز پیام نمی‌گیرد | باید یک‌بار خودش `/start` کرده باشد تا `telegram_id` ثبت شود |
 
 ## 21. Template Calibration

@@ -64,9 +64,10 @@ async def world(sessionmaker):
 def bot_and_dp(tmp_path, sessionmaker):
     from app.bot.handlers import advisor as advisor_mod
     from app.bot.handlers import common as common_mod
+    from app.bot.handlers import fallback as fallback_mod
     from app.bot.handlers import student as student_mod
 
-    for module in (common_mod, student_mod, advisor_mod):
+    for module in (common_mod, student_mod, advisor_mod, fallback_mod):
         module.router._parent_router = None
     service = WeeklyPlanService(get_renderer("pillow"), storage_root=tmp_path)
     bot, api = make_bot()
@@ -266,3 +267,106 @@ async def test_student_screen_is_minimal(bot_and_dp, world):
     await dp.feed_update(bot, message_update("/start", STUDENT_TG, 1))
     labels = [b.text for row in markups(api)[-1].inline_keyboard for b in row]
     assert len(labels) <= 3, f"student menu is too busy: {labels}"
+
+
+# ────────────────────────── button coverage (regression) ───────────────────
+# Bug found in production v1.0.1: the main-menu button «👨‍🎓 دانش‌آموزان» had no
+# handler, so Telegram spun forever. These tests press EVERY button of EVERY
+# screen and require a real answer.
+
+def _collect_callback_data() -> dict[str, str]:
+    """Every callback_data the UI can emit, keyed by screen:label."""
+    from app.domain.models import WeeklyPlan
+
+    domain = WeeklyPlan(student_name="علی", student_id="1")
+    domain.apply_week_start(saturday_of(date.today()))
+    domain.day("saturday").set_slot(0, Activity(0, subject="زیست"))
+
+    screens = _all_static_keyboards()
+    screens["students_list"] = kb.students_list([], 0, 0, 8)
+    out: dict[str, str] = {}
+    for screen, markup in screens.items():
+        for row in markup.inline_keyboard:
+            for button in row:
+                if button.callback_data:
+                    out[f"{screen}:{button.text}"] = button.callback_data
+    return out
+
+
+def test_every_button_has_a_registered_handler():
+    """Static check: each callback_data matches at least one router filter."""
+    from aiogram.types import CallbackQuery, Chat, Message, User as TgUser
+    from aiogram.types import Update  # noqa: F401
+
+    from app.bot.handlers import advisor as advisor_mod
+    from app.bot.handlers import common as common_mod
+    from app.bot.handlers import fallback as fallback_mod
+    from app.bot.handlers import student as student_mod
+
+    prefixes: set[str] = set()
+    for module in (common_mod, student_mod, advisor_mod, fallback_mod):
+        for handler in module.router.callback_query.handlers:
+            for flt in handler.filters or []:
+                callback = getattr(flt, "callback", None)
+                # CallbackData factory filters expose the owning class
+                factory = getattr(callback, "callback_data", None)
+                if factory is not None:
+                    prefixes.add(factory.__prefix__)
+    assert {"n", "st", "wk", "p", "d", "s", "a"} <= prefixes
+
+
+@pytest.mark.parametrize("origin,payload", sorted(_collect_callback_data().items()))
+async def test_pressing_any_button_gets_an_answer(bot_and_dp, world, origin, payload):
+    """Dynamic check: no button may leave the user with a spinning clock."""
+    bot, api, dp = bot_and_dp
+    payload = payload.replace(":1:", f":{world['plan']}:")  # point at a real plan
+    if payload.endswith(":1"):
+        payload = payload[:-2] + f":{world['plan']}"
+    api.clear()
+    await dp.feed_update(bot, callback_update(payload, ADVISOR_TG, 1))
+
+    answered = api.calls("AnswerCallbackQuery")
+    produced_output = api.calls("SendMessage") or api.calls("EditMessageText") \
+        or api.calls("SendPhoto") or api.calls("SendDocument")
+    assert answered or produced_output, (
+        f"button '{origin}' ({payload}) produced no response — Telegram would hang"
+    )
+    # the fallback router must not be the one rescuing us
+    alerts = [a.text for a in answered if getattr(a, "text", None)]
+    assert not any("دیگر معتبر نیست" in (t or "") for t in alerts), (
+        f"button '{origin}' ({payload}) has no dedicated handler"
+    )
+
+
+async def test_students_menu_button_opens_the_roster(bot_and_dp, world):
+    """The exact bug reported in production."""
+    bot, api, dp = bot_and_dp
+    api.clear()
+    await dp.feed_update(bot, callback_update(Nav(to="students").pack(), ADVISOR_TG, 1))
+    assert api.calls("AnswerCallbackQuery"), "callback was never answered"
+    text = " ".join(api.texts())
+    assert "دانش‌آموز" in text
+    buttons = [b.text for m in markups(api) for row in m.inline_keyboard for b in row]
+    assert any("علی رضایی" in b for b in buttons), buttons  # roster is clickable
+
+
+async def test_students_screen_is_empty_state_when_nobody_assigned(
+    bot_and_dp, sessionmaker
+):
+    bot, api, dp = bot_and_dp
+    async with sessionmaker() as s:
+        await UserRepository(s).create("مشاور تنها", Role.ADVISOR, telegram_id=7777)
+        await s.commit()
+    api.clear()
+    await dp.feed_update(bot, callback_update(Nav(to="students").pack(), 7777, 1))
+    assert any("add-student" in t for t in api.texts()), api.texts()
+    assert api.calls("AnswerCallbackQuery")
+
+
+async def test_unknown_callback_is_answered_not_hanging(bot_and_dp, world):
+    bot, api, dp = bot_and_dp
+    api.clear()
+    await dp.feed_update(bot, callback_update("n:totally_unknown", ADVISOR_TG, 1))
+    answered = api.calls("AnswerCallbackQuery")
+    assert answered, "orphan callback must still be answered"
+    assert any("معتبر نیست" in (a.text or "") for a in answered)

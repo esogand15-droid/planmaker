@@ -92,6 +92,28 @@ class UserRepository:
             stmt = stmt.where(or_(User.full_name.ilike(pattern), User.username.ilike(pattern)))
         return int((await self.s.execute(stmt)).scalar_one())
 
+    async def all_students(
+        self, *, query: str | None = None, limit: int = 8, offset: int = 0
+    ) -> list[User]:
+        """Admin view: every student in the system."""
+        stmt = select(User).where(User.role == Role.STUDENT, User.is_active.is_(True))
+        if query:
+            pattern = f"%{query.strip()}%"
+            stmt = stmt.where(or_(User.full_name.ilike(pattern), User.username.ilike(pattern)))
+        return list(
+            (await self.s.execute(stmt.order_by(User.full_name).limit(limit).offset(offset)))
+            .scalars()
+        )
+
+    async def count_all_students(self, query: str | None = None) -> int:
+        stmt = select(func.count()).select_from(User).where(
+            User.role == Role.STUDENT, User.is_active.is_(True)
+        )
+        if query:
+            pattern = f"%{query.strip()}%"
+            stmt = stmt.where(or_(User.full_name.ilike(pattern), User.username.ilike(pattern)))
+        return int((await self.s.execute(stmt)).scalar_one())
+
     async def is_assigned(self, advisor_id: int, student_id: int) -> bool:
         res = await self.s.execute(
             select(AdvisorStudent.id).where(

@@ -61,25 +61,49 @@ async def new_plan(
     await _show_students(cq, session, user, page=0, query=None)
 
 
+async def _list_students(manager: PlanManager, user: User, query, page, size):
+    """Admins see every student; advisors only the ones assigned to them."""
+    if user.role == Role.ADMIN:
+        students = await manager.users.all_students(
+            query=query, limit=size, offset=page * size
+        )
+        total = await manager.users.count_all_students(query)
+    else:
+        students = await manager.users.students_of(
+            user.id, query=query, limit=size, offset=page * size
+        )
+        total = await manager.users.count_students_of(user.id, query)
+    return students, total
+
+
 async def _show_students(
-    cq: CallbackQuery, session: AsyncSession, user: User, page: int, query: str | None
+    cq: CallbackQuery, session: AsyncSession, user: User, page: int, query: str | None,
+    *, title: str | None = None,
 ) -> None:
     manager = PlanManager(session)
     size = settings.students_page_size
-    students = await manager.users.students_of(
-        user.id, query=query, limit=size, offset=page * size
-    )
-    total = await manager.users.count_students_of(user.id, query)
+    students, total = await _list_students(manager, user, query, page, size)
     if not students and not query:
-        await cq.message.edit_text(T.NO_STUDENTS, reply_markup=kb.back_only())
+        await _safe_edit(cq, T.NO_STUDENTS, kb.back_only())
         await cq.answer()
         return
-    await cq.message.edit_text(
-        T.CHOOSE_STUDENT,
-        reply_markup=kb.students_list(students, page, total, size),
-        parse_mode="HTML",
-    )
+    if title is None:
+        title = T.CHOOSE_STUDENT
+    await _safe_edit(cq, title.format(count=to_fa_digits(str(total))),
+                     kb.students_list(students, page, total, size))
     await cq.answer()
+
+
+@router.callback_query(Nav.filter(F.to == "students"))
+async def show_students(
+    cq: CallbackQuery, state: FSMContext, user: User, session: AsyncSession
+) -> None:
+    """Menu → 👨‍🎓 دانش‌آموزان (view the roster, then optionally start a plan)."""
+    if not _is_advisor(user):
+        raise AccessDenied(T.ACCESS_DENIED)
+    await state.set_state(PlanFlow.select_student)
+    await state.update_data(query=None)
+    await _show_students(cq, session, user, page=0, query=None, title=T.STUDENTS_TITLE)
 
 
 @router.callback_query(StudentCB.filter(F.action == "page"))
@@ -107,8 +131,7 @@ async def students_search_input(
     await state.set_state(PlanFlow.select_student)
     manager = PlanManager(session)
     size = settings.students_page_size
-    students = await manager.users.students_of(user.id, query=query, limit=size)
-    total = await manager.users.count_students_of(user.id, query)
+    students, total = await _list_students(manager, user, query, 0, size)
     if not students:
         await message.answer("نتیجه‌ای پیدا نشد.", reply_markup=kb.back_only("new"))
         return
