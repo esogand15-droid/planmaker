@@ -183,3 +183,58 @@ def test_gitignore_covers_runtime_artifacts():
     ignored = (ROOT / ".gitignore").read_text(encoding="utf-8")
     for pattern in (".env", "__pycache__/", ".pytest_cache/", "out/", "generated/", "*.log"):
         assert pattern in ignored, f"{pattern} not ignored"
+
+
+# ------------------------------------------------------- alembic env.py -----
+def _alembic_dry_run(url: str):
+    """Run `alembic upgrade head` against an unreachable host and capture output.
+
+    We only care about *which driver* Alembic picks — reaching the TCP connect
+    stage proves the async driver was selected.
+    """
+    import os
+    import subprocess
+
+    env = {**os.environ, "DATABASE_URL": url}
+    return subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=120,
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgres://u:pw@127.0.0.1:5999/nodb",                     # Railway/Heroku style
+        "postgresql://u:pw@127.0.0.1:5999/nodb",                   # plain sync scheme
+        "postgresql://u:pw@127.0.0.1:5999/nodb?sslmode=require",   # libpq-only arg
+        "postgresql://u:p%40ss%25word@127.0.0.1:5999/nodb",        # '%' in the password
+        "postgresql+asyncpg://u:pw@127.0.0.1:5999/nodb",           # already async
+    ],
+)
+def test_alembic_always_uses_the_async_driver(url):
+    """Regression: a sync DATABASE_URL must not make Alembic import psycopg2."""
+    result = _alembic_dry_run(url)
+    output = result.stdout + result.stderr
+    assert "psycopg2" not in output, f"Alembic fell back to psycopg2 for {url}"
+    assert "No module named" not in output
+    assert "InterpolationSyntaxError" not in output  # '%' handling
+    # it should fail only because nothing listens on that port
+    assert any(
+        marker in output
+        for marker in ("Connect call failed", "ConnectionRefused", "connection refused")
+    ), output[-600:]
+
+
+def test_alembic_runs_against_sqlite(tmp_path):
+    import os
+    import subprocess
+
+    db = tmp_path / "alembic_check.db"
+    env = {**os.environ, "DATABASE_URL": f"sqlite+aiosqlite:///{db}"}
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert db.exists()

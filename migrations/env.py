@@ -25,10 +25,15 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.config import settings  # noqa: E402
+from app.config import normalize_database_url, settings  # noqa: E402
 from app.db.models import Base  # noqa: E402
 
-config.set_main_option("sqlalchemy.url", os.getenv("DATABASE_URL", settings.database_url))
+# Railway/Heroku expose a SYNC url (postgresql://…). Alembic runs with the async
+# engine here, so it must be normalised to postgresql+asyncpg:// exactly like the
+# application does — otherwise SQLAlchemy tries to import psycopg2 and dies with
+# ModuleNotFoundError. '%' is escaped because set_main_option interpolates it.
+_url = normalize_database_url(os.getenv("DATABASE_URL") or settings.database_url)
+config.set_main_option("sqlalchemy.url", _url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 

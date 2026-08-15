@@ -168,6 +168,7 @@ python -m tools.smoke_test --full
 |---|---|
 | `BOT_TOKEN is not set` | Variable در Railway ست نشده |
 | `TelegramConflictError` | بیش از یک Instance؛ Replicas = 1 و ربات محلی را ببندید |
+| `No module named 'psycopg2'` | فقط در نسخه‌های قبل از v1.0.1 رخ می‌داد؛ این بسته v1.0.1 است و `DATABASE_URL` را خودکار به درایور async تبدیل می‌کند |
 | `database unreachable` | `DATABASE_URL` باید Reference به سرویس Postgres باشد |
 | `chromium: False` | PDF رستر تولید می‌شود (ربات سالم است)؛ برای PDF برداری Build را دوباره اجرا کنید |
 | دانش‌آموز پیام نمی‌گیرد | باید یک‌بار خودش `/start` کرده باشد |

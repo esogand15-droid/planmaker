@@ -9,7 +9,7 @@
 |---|---|
 | Template Version | `rotbeland-weekly-v1` |
 | Renderer Version | `html-chromium-1.0.0` (اصلی) · `pillow-1.0.0` (fallback) |
-| Tests | **88 passed** (Renderer 26 · Bot Flow 13 · Security 36 · Deployment 13) + UX 47 |
+| Tests | **141 passed** (Renderer 26 · Bot Flow 13 · Security 36 · Deployment 19 · UX 47) |
 | Stack | Python 3.12 · aiogram 3 · SQLAlchemy 2 async · PostgreSQL · Alembic · Pillow/libraqm · Playwright |
 
 ---
@@ -350,6 +350,7 @@ python -m tools.smoke_test --send-to 12345 # + ارسال نمونه به یک �
 | `Chromium is not installed` | `python -m playwright install chromium` — یا نادیده بگیرید، Pillow کار می‌کند |
 | PDF بدون متن انتخاب‌شدنی | یعنی از مسیر Pillow ساخته شده (Chromium در دسترس نبوده) |
 | فایل‌ها بعد از Deploy گم شده‌اند | Volume ماونت نشده؛ سیستم خودکار Re-render می‌کند ولی Volume را اضافه کنید |
+| `ModuleNotFoundError: No module named 'psycopg2'` | نسخه‌های قبل از v1.0.1؛ `migrations/env.py` باید `DATABASE_URL` را به `postgresql+asyncpg://` تبدیل کند. در v1.0.1 رفع شده است |
 | `database unreachable after N attempts` | `DATABASE_URL` یا دسترسی شبکه؛ `DB_CONNECT_RETRIES` را بالا ببرید |
 | هشدار «متن بیش از ظرفیت سلول» | متن فعالیت را کوتاه‌تر کنید؛ سیستم عمداً فونت را بی‌نهایت کوچک نمی‌کند |
 | دانش‌آموز پیام نمی‌گیرد | باید یک‌بار خودش `/start` کرده باشد تا `telegram_id` ثبت شود |
