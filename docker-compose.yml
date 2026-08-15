@@ -1,0 +1,48 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: rotbeland
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rotbeland}
+      POSTGRES_DB: rotbeland
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rotbeland"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    restart: unless-stopped
+
+  bot:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      DATABASE_URL: postgresql+asyncpg://rotbeland:${POSTGRES_PASSWORD:-rotbeland}@db/rotbeland
+      REDIS_URL: redis://redis:6379/0
+      RENDER_BACKEND: ${RENDER_BACKEND:-auto}
+      ADMIN_IDS: ${ADMIN_IDS:-}
+      STORAGE_ROOT: /data/generated
+      LOG_LEVEL: INFO
+    volumes:
+      - generated:/data/generated
+    command: >
+      sh -c "alembic upgrade head && python -m app.bot.main"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  generated:

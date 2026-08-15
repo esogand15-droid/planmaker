@@ -1,0 +1,20 @@
+# ── Core: Telegram + persistence ───────────────────────────────────────────
+aiogram>=3.7,<4
+SQLAlchemy[asyncio]>=2.0,<3
+asyncpg>=0.29            # PostgreSQL async driver (production)
+alembic>=1.13
+redis>=5.0               # optional FSM storage (only used when REDIS_URL is set)
+
+# ── Rendering ──────────────────────────────────────────────────────────────
+pillow>=11.0             # MUST be built with libraqm for HarfBuzz Persian shaping
+jinja2>=3.1
+jdatetime>=5.0
+arabic-reshaper>=3.0     # fallback shaping when libraqm is unavailable
+python-bidi>=0.6
+playwright>=1.44         # after install: python -m playwright install chromium
+
+# ── Dev / test ─────────────────────────────────────────────────────────────
+pytest>=8.0
+pytest-asyncio>=0.23
+aiosqlite>=0.20          # in-memory database for the test-suite only
+numpy>=1.26              # calibration probe tool

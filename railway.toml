@@ -1,0 +1,26 @@
+# Railway deployment configuration — Rotbe Land weekly planner
+# Docs: https://docs.railway.com/reference/config-as-code
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Migrations run once per deploy, before the new instance takes traffic.
+preDeployCommand = ["alembic upgrade head"]
+startCommand = "./docker-entrypoint.sh bot"
+
+# Telegram long-polling requires exactly ONE active instance.
+numReplicas = 1
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+# Health check only applies when the service exposes PORT.
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+
+[deploy.multiRegionConfig]
+# keep a single region: a second replica would double-consume Telegram updates
+
+[[services]]
+name = "bot"

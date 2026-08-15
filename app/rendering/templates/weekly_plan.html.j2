@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<style>
+  @font-face { font-family: 'Vazirmatn'; font-weight: 400;
+               src: url('data:font/ttf;base64,{{ font_regular_b64 }}') format('truetype'); }
+  @font-face { font-family: 'Vazirmatn'; font-weight: 500;
+               src: url('data:font/ttf;base64,{{ font_medium_b64 }}') format('truetype'); }
+  @font-face { font-family: 'Vazirmatn'; font-weight: 700;
+               src: url('data:font/ttf;base64,{{ font_bold_b64 }}') format('truetype'); }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: {{ W }}px; height: {{ H }}px; }
+  body {
+    position: relative;
+    font-family: 'Vazirmatn', sans-serif;
+    background-image: url('data:image/png;base64,{{ template_b64 }}');
+    background-size: {{ W }}px {{ H }}px;
+    background-repeat: no-repeat;
+    -webkit-font-smoothing: antialiased;
+  }
+  .cell, .date, .assign {
+    position: absolute;
+    direction: rtl;
+    text-align: right;
+    overflow: hidden;
+    white-space: normal;
+    word-break: break-word;
+  }
+  .cell {
+    display: flex; flex-direction: column; justify-content: center;
+    color: {{ cell_color }};
+    line-height: {{ cell_line_gap }};
+  }
+  .cell .subject { font-weight: 700; }
+  .date {
+    color: {{ date_color }};
+    background: {{ green }};
+    display: flex; align-items: center; justify-content: flex-start;
+    font-weight: 500;
+  }
+  .assign {
+    color: {{ assign_color }};
+    font-weight: 500;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+{% for d in dates %}
+  <div class="date" id="date-{{ d.key }}"
+       style="right: {{ W - d.box.right }}px; top: {{ d.box.y - pad }}px;
+              width: {{ d.box.w }}px; height: {{ d.box.h + 2 * pad }}px;
+              font-size: {{ d.size }}px; padding: 0 2px;">{{ d.text }}</div>
+{% endfor %}
+
+{% for c in cells %}
+  <div class="cell" data-fit="1"
+       id="cell-{{ c.weekday }}-{{ c.slot }}"
+       style="right: {{ W - c.box.right }}px; top: {{ c.box.y }}px;
+              width: {{ c.box.w }}px; height: {{ c.box.h }}px;
+              padding: {{ c.pad_y }}px {{ c.pad_x }}px;
+              font-size: {{ c.size }}px;"
+       data-max="{{ c.size }}" data-min="{{ c.min_size }}">
+    {%- for line in c.lines %}
+    <div class="{{ 'subject' if loop.first and c.bold_first else '' }}">{{ line }}</div>
+    {%- endfor %}
+  </div>
+{% endfor %}
+
+{% for a in assignments %}
+  <div class="assign" data-fit="1" id="assign-{{ loop.index0 }}"
+       style="right: {{ W - a.right }}px; top: {{ a.top }}px;
+              width: {{ a.width }}px; height: {{ a.height }}px;
+              font-size: {{ a.size }}px; line-height: {{ a.height }}px;"
+       data-max="{{ a.size }}" data-min="{{ a.min_size }}">{{ a.text }}</div>
+{% endfor %}
+</body>
+</html>
