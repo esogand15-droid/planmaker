@@ -33,10 +33,23 @@ class DatabaseMiddleware(BaseMiddleware):
 
 
 class UserMiddleware(BaseMiddleware):
-    """Resolves (and lazily registers) the Telegram user behind every update."""
+    """Resolves the Telegram user behind every update.
+
+    Registration is *invitation based*: random people who find the bot are not
+    written to the database. A row is created only for configured admins; every
+    other account must be created by an advisor and claimed through an invite
+    deep link (handled in handlers/common.py, which receives user=None).
+    """
+
+    INVITE_PREFIX = "/start inv_"
 
     def __init__(self, admin_ids: tuple[int, ...] = ()):
         self.admin_ids = set(admin_ids)
+
+    @staticmethod
+    def _is_invite_start(event: TelegramObject) -> bool:
+        text = getattr(event, "text", None) or ""
+        return text.startswith("/start") and "inv_" in text
 
     async def __call__(self, handler, event: TelegramObject, data: dict[str, Any]) -> Any:
         tg_user: TgUser | None = data.get("event_from_user")
@@ -47,19 +60,31 @@ class UserMiddleware(BaseMiddleware):
         repo = UserRepository(session)
         user = await repo.by_telegram_id(tg_user.id)
         full_name = tg_user.full_name or str(tg_user.id)
-        if user is None:
-            role = Role.ADMIN if tg_user.id in self.admin_ids else Role.STUDENT
+
+        if user is None and tg_user.id in self.admin_ids:
             user = await repo.create(
                 full_name=full_name,
-                role=role,
+                role=Role.ADMIN,
                 telegram_id=tg_user.id,
                 username=tg_user.username,
             )
-            log.info("registered user tg=%s role=%s", tg_user.id, role.value)
-        else:
+            log.info("registered admin from ADMIN_IDS tg=%s", tg_user.id)
+        elif user is not None:
             await repo.touch_profile(user, tg_user.username, full_name)
             if tg_user.id in self.admin_ids and user.role != Role.ADMIN:
                 user.role = Role.ADMIN
+            if not user.is_active:
+                user.is_active = True
+
+        if user is None:
+            # unknown account: only an invite deep link may proceed
+            if self._is_invite_start(event):
+                data["user"] = None
+                return await handler(event, data)
+            log.info("ignored update from unregistered tg=%s", tg_user.id)
+            await _reply(event, T.NOT_REGISTERED)
+            return None
+
         data["user"] = user
         return await handler(event, data)
 

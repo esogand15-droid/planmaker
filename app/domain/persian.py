@@ -1,9 +1,24 @@
 """Persian text / date utilities: digits, Jalali conversion, RTL shaping fallback."""
 from __future__ import annotations
 
-from datetime import date
+import os
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import jdatetime
+
+#: All "today"/"this week" logic must follow the consultant's wall clock.
+#: On Railway the server runs in UTC, which is 3.5 hours behind Tehran — between
+#: 00:00 and 03:30 local time that would compute yesterday's week.
+TIMEZONE = ZoneInfo(os.getenv("TIMEZONE", "Asia/Tehran"))
+
+
+def now_local() -> datetime:
+    return datetime.now(TIMEZONE)
+
+
+def today_local() -> date:
+    return now_local().date()
 
 FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹"
 EN_DIGITS = "0123456789"

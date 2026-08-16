@@ -12,7 +12,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from ..domain.models import PlanStatus, WeeklyPlan
-from ..domain.persian import week_label
+from ..domain.persian import today_local, week_label
 from ..rendering.base import BaseRenderer, OverflowIssue
 from ..rendering.factory import get_renderer
 from ..rendering.pdf import png_to_pdf
@@ -114,7 +114,7 @@ class WeeklyPlanService:
     def file_stem(self, plan: WeeklyPlan) -> str:
         """ASCII-safe physical filename; the Persian text lives in the caption."""
         sid = plan.student_id or plan.id
-        day = (plan.week_start or date.today()).isoformat()
+        day = (plan.week_start or today_local()).isoformat()
         return f"rotbeland_weekly_plan_{sid}_{day}_v{plan.version}"
 
     def caption(self, plan: WeeklyPlan) -> str:
@@ -126,7 +126,7 @@ class WeeklyPlanService:
         return f"برنامه هفتگی - {plan.student_name or 'دانش‌آموز'} - هفته {label}"
 
     def _dir_for(self, plan: WeeklyPlan) -> Path:
-        d = plan.week_start or date.today()
+        d = plan.week_start or today_local()
         sid = plan.student_id or plan.id
         path = self.storage_root / f"{d.year:04d}" / f"{d.month:02d}" / str(sid)
         path.mkdir(parents=True, exist_ok=True)

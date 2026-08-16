@@ -29,13 +29,15 @@ services:
       redis:
         condition: service_started
     environment:
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      BOT_TOKEN: ${BOT_TOKEN}
       DATABASE_URL: postgresql+asyncpg://rotbeland:${POSTGRES_PASSWORD:-rotbeland}@db/rotbeland
       REDIS_URL: redis://redis:6379/0
       RENDER_BACKEND: ${RENDER_BACKEND:-auto}
       ADMIN_IDS: ${ADMIN_IDS:-}
       STORAGE_ROOT: /data/generated
       LOG_LEVEL: INFO
+      TIMEZONE: Asia/Tehran
+      RUN_MIGRATIONS_ON_START: "true"
     volumes:
       - generated:/data/generated
     command: >

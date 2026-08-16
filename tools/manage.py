@@ -22,6 +22,7 @@ from app.config import settings  # noqa: E402
 from app.db.models import Role  # noqa: E402
 from app.db.session import create_all, init_engine, session_scope  # noqa: E402
 from app.domain.persian import week_label  # noqa: E402
+from app.services.plan_manager import PlanManager  # noqa: E402
 from app.repositories.repositories import (  # noqa: E402
     AuditRepository,
     PlanRepository,
@@ -75,6 +76,24 @@ async def cmd_list_plans(advisor: int | None) -> None:
             )
 
 
+async def cmd_cleanup(days: int, dry_run: bool) -> None:
+    """Retention: delete plans (and their files) older than `days`."""
+    init_engine()
+    async with session_scope() as s:
+        manager = PlanManager(s)
+        if dry_run:
+            from datetime import timedelta
+
+            from app.domain.persian import today_local
+
+            cutoff = today_local() - timedelta(days=days)
+            stale = await manager.plans.older_than(cutoff)
+            print(f"would delete {len(stale)} plan(s) with week_end < {cutoff}")
+            return
+        plans, files = await manager.purge_older_than(days)
+        print(f"deleted {plans} plan(s) and {files} file(s)")
+
+
 async def cmd_audit() -> None:
     init_engine()
     async with session_scope() as s:
@@ -104,6 +123,13 @@ def main() -> None:
     p.add_argument("--advisor", type=int, required=True)
     p.add_argument("--student", type=int, required=True)
 
+    p = sub.add_parser("cleanup", help="delete plans older than N days")
+    p.add_argument(
+        "--days", type=int, default=None,
+        help="defaults to the RETENTION_DAYS environment variable",
+    )
+    p.add_argument("--dry-run", action="store_true")
+
     sub.add_parser("list-users")
     p = sub.add_parser("list-plans")
     p.add_argument("--advisor", type=int)
@@ -122,6 +148,13 @@ def main() -> None:
         asyncio.run(cmd_list_users())
     elif args.cmd == "list-plans":
         asyncio.run(cmd_list_plans(args.advisor))
+    elif args.cmd == "cleanup":
+        days = args.days if args.days is not None else settings.retention_days
+        if days <= 0:
+            raise SystemExit(
+                "nothing to do: pass --days N or set RETENTION_DAYS (0 = keep forever)"
+            )
+        asyncio.run(cmd_cleanup(days, args.dry_run))
     elif args.cmd == "audit":
         asyncio.run(cmd_audit())
 

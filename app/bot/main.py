@@ -51,10 +51,11 @@ def build_dispatcher(queue: RenderQueue, sessionmaker, admin_ids=(), storage=Non
     dp["queue"] = queue
 
     for observer in (dp.message, dp.callback_query):
+        # outermost first: the error shield must also cover session/user setup
+        observer.middleware(ErrorMiddleware())
         observer.middleware(ThrottleMiddleware())
         observer.middleware(DatabaseMiddleware(sessionmaker))
         observer.middleware(UserMiddleware(tuple(admin_ids)))
-        observer.middleware(ErrorMiddleware())
 
     dp.include_router(common.router)
     dp.include_router(student.router)

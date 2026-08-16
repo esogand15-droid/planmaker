@@ -61,6 +61,7 @@ Railway Project
 | Variable | مقدار |
 |---|---|
 | `BOT_TOKEN` | توکن @BotFather |
+| `TIMEZONE` | `Asia/Tehran` (مهم: سرور روی UTC است) |
 | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` ← Reference، دستی کپی نکنید |
 | `ENVIRONMENT` | `production` |
 | `ADMIN_IDS` | تلگرام آی‌دی عددی شما (مثلاً `123456789`) |
@@ -123,9 +124,14 @@ authorized as @<your_bot>
 
 ```bash
 python -m tools.manage add-advisor "نام مشاور" --telegram-id <TELEGRAM_ID>
-python -m tools.manage add-student "علی رضایی" --advisor 1 --telegram-id <STUDENT_TG_ID>
 python -m tools.manage list-users
 ```
+
+شناسه تلگرام خود را با فرستادن `/id` به ربات ببینید.
+
+**دانش‌آموزان دیگر نیازی به خط فرمان ندارند:** مشاور در ربات می‌زند
+«👨‍🎓 دانش‌آموزان → ➕ افزودن دانش‌آموز»، نام را می‌فرستد و یک لینک دعوت
+می‌گیرد که برای دانش‌آموز ارسال می‌کند.
 
 هر آی‌دی داخل `ADMIN_IDS` در اولین `/start` خودکار نقش **admin** می‌گیرد و به همه
 دانش‌آموزان دسترسی دارد؛ برای مشاوران عادی از دستور بالا استفاده کنید.

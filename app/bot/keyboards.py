@@ -10,7 +10,7 @@ from ..db.models import User, WeeklyPlanDB
 from ..domain.models import SLOTS_PER_DAY, WEEKDAY_KEYS, WeeklyPlan
 from ..domain.persian import jalali_day_month, jalali_short, to_fa_digits, week_label
 from . import texts as T
-from .texts import AssignCB, DayCB, Nav, PlanCB, SlotCB, StudentCB, WeekCB
+from .texts import AssignCB, DayCB, FileCB, ListCB, Nav, PlanCB, SlotCB, StudentCB, WeekCB
 
 
 def advisor_menu() -> InlineKeyboardMarkup:
@@ -35,32 +35,119 @@ def student_menu(has_plan: bool) -> InlineKeyboardMarkup:
 
 
 def students_list(
-    students: list[User], page: int, total: int, page_size: int
+    students: list[User], page: int, total: int, page_size: int, *, mode: str = "pick"
 ) -> InlineKeyboardMarkup:
+    """mode='pick' → choose a student for a new plan; mode='card' → manage roster."""
     kb = InlineKeyboardBuilder()
+    action = "pick" if mode == "pick" else "card"
     for s in students:
-        kb.button(text=f"👤 {s.full_name}", callback_data=StudentCB(action="pick", student_id=s.id))
+        dot = "🟢" if s.telegram_id else "🟡"
+        label = f"{dot} {s.full_name}"
+        if s.grade:
+            label += f" · {s.grade}"
+        kb.button(
+            text=label[:34],
+            callback_data=StudentCB(action=action, student_id=s.id, mode=mode),
+        )
     kb.adjust(*([1] * len(students)))
 
     nav: list[InlineKeyboardButton] = []
     if page > 0:
         nav.append(
             InlineKeyboardButton(
-                text="◀️ قبلی", callback_data=StudentCB(action="page", page=page - 1).pack()
+                text="◀️ قبلی",
+                callback_data=StudentCB(action="page", page=page - 1, mode=mode).pack(),
             )
         )
     if (page + 1) * page_size < total:
         nav.append(
             InlineKeyboardButton(
-                text="بعدی ▶️", callback_data=StudentCB(action="page", page=page + 1).pack()
+                text="بعدی ▶️",
+                callback_data=StudentCB(action="page", page=page + 1, mode=mode).pack(),
             )
         )
     if nav:
         kb.row(*nav)
     kb.row(
-        InlineKeyboardButton(text="🔎 جستجو", callback_data=StudentCB(action="search").pack()),
+        InlineKeyboardButton(
+            text="➕ افزودن دانش‌آموز",
+            callback_data=StudentCB(action="add", mode=mode).pack(),
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="🔎 جستجو", callback_data=StudentCB(action="search", mode=mode).pack()
+        ),
         InlineKeyboardButton(text="⬅️ بازگشت", callback_data=Nav(to="menu").pack()),
     )
+    return kb.as_markup()
+
+
+def no_students(mode: str = "card") -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="➕ افزودن دانش‌آموز", callback_data=StudentCB(action="add", mode=mode)
+    )
+    kb.button(text="⬅️ بازگشت", callback_data=Nav(to="menu"))
+    kb.adjust(1, 1)
+    return kb.as_markup()
+
+
+def student_card(student: User) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="➕ برنامه جدید برای او",
+        callback_data=StudentCB(action="pick", student_id=student.id, mode="card"),
+    )
+    kb.adjust(1)
+    if not student.telegram_id:
+        kb.row(
+            InlineKeyboardButton(
+                text="🔗 لینک دعوت",
+                callback_data=StudentCB(action="invite", student_id=student.id).pack(),
+            )
+        )
+    kb.row(
+        InlineKeyboardButton(
+            text="📂 برنامه‌های او",
+            callback_data=ListCB(kind="student", ref=student.id).pack(),
+        ),
+        InlineKeyboardButton(
+            text="🗑 حذف",
+            callback_data=StudentCB(action="ask_del", student_id=student.id).pack(),
+        ),
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="⬅️ فهرست دانش‌آموزان", callback_data=Nav(to="students").pack()
+        )
+    )
+    return kb.as_markup()
+
+
+def confirm_remove_student(student_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="🗑 بله، حذف شود",
+        callback_data=StudentCB(action="del", student_id=student_id),
+    )
+    kb.button(
+        text="❌ انصراف",
+        callback_data=StudentCB(action="card", student_id=student_id, mode="card"),
+    )
+    kb.adjust(1, 1)
+    return kb.as_markup()
+
+
+def student_created(student: User) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="➕ ساخت برنامه برای او",
+        callback_data=StudentCB(action="pick", student_id=student.id, mode="card"),
+    )
+    kb.button(text="➕ دانش‌آموز بعدی", callback_data=StudentCB(action="add", mode="card"))
+    kb.button(text="⬅️ فهرست دانش‌آموزان", callback_data=Nav(to="students"))
+    kb.adjust(1, 1, 1)
     return kb.as_markup()
 
 
@@ -252,14 +339,23 @@ def send_confirm(plan_id: int) -> InlineKeyboardMarkup:
 
 
 def plan_list(
-    plans: list[WeeklyPlanDB], page: int, total: int, page_size: int, *, student_view: bool = False
+    plans: list[WeeklyPlanDB],
+    page: int,
+    total: int,
+    page_size: int,
+    *,
+    kind: str = "history",
+    ref: int = 0,
+    student_view: bool = False,
 ) -> InlineKeyboardMarkup:
+    """`kind` keeps pagination on the same list (history/drafts/mine/student)."""
     kb = InlineKeyboardBuilder()
     for plan in plans:
         label = week_label(plan.week_start, plan.week_end)
-        who = "" if student_view else f" · {plan.student.full_name}"
+        who = "" if student_view or kind == "student" else f" · {plan.student.full_name}"
+        mark = "📝" if plan.status.value == "draft" else "📅"
         kb.button(
-            text=f"📅 {label}{who}",
+            text=f"{mark} {label}{who}"[:34],
             callback_data=PlanCB(action="open", plan_id=plan.id),
         )
     kb.adjust(*([1] * len(plans)))
@@ -267,18 +363,48 @@ def plan_list(
     if page > 0:
         nav.append(
             InlineKeyboardButton(
-                text="◀️ قبلی", callback_data=PlanCB(action="hpage", plan_id=0, page=page - 1).pack()
+                text="◀️ قبلی",
+                callback_data=ListCB(kind=kind, page=page - 1, ref=ref).pack(),
             )
         )
     if (page + 1) * page_size < total:
         nav.append(
             InlineKeyboardButton(
-                text="بعدی ▶️", callback_data=PlanCB(action="hpage", plan_id=0, page=page + 1).pack()
+                text="بعدی ▶️",
+                callback_data=ListCB(kind=kind, page=page + 1, ref=ref).pack(),
             )
         )
     if nav:
         kb.row(*nav)
-    kb.row(InlineKeyboardButton(text="⬅️ منو", callback_data=Nav(to="menu").pack()))
+    back = (
+        StudentCB(action="card", student_id=ref, mode="card").pack()
+        if kind == "student" and ref
+        else Nav(to="menu").pack()
+    )
+    kb.row(InlineKeyboardButton(text="⬅️ بازگشت", callback_data=back))
+    return kb.as_markup()
+
+
+def versions_list(files, plan_id: int) -> InlineKeyboardMarkup:
+    """Previously generated artefacts of a plan (newest first)."""
+    kb = InlineKeyboardBuilder()
+    for record in files:
+        version = to_fa_digits(str(record.version))
+        kb.row(
+            InlineKeyboardButton(
+                text=f"🖼 نسخه {version}",
+                callback_data=FileCB(action="get", file_id=record.id, kind="png").pack(),
+            ),
+            InlineKeyboardButton(
+                text=f"📄 نسخه {version}",
+                callback_data=FileCB(action="get", file_id=record.id, kind="pdf").pack(),
+            ),
+        )
+    kb.row(
+        InlineKeyboardButton(
+            text="⬅️ بازگشت", callback_data=PlanCB(action="open", plan_id=plan_id).pack()
+        )
+    )
     return kb.as_markup()
 
 
@@ -301,6 +427,13 @@ def plan_card(plan: WeeklyPlanDB, *, can_edit: bool, can_send: bool) -> InlineKe
             InlineKeyboardButton(
                 text="📤 ارسال برای دانش‌آموز",
                 callback_data=PlanCB(action="ask_send", plan_id=plan.id).pack(),
+            )
+        )
+    if can_edit and len(plan.files) > 1:
+        kb.row(
+            InlineKeyboardButton(
+                text="🗂 نسخه‌های قبلی",
+                callback_data=PlanCB(action="versions", plan_id=plan.id).pack(),
             )
         )
     kb.row(InlineKeyboardButton(text="⬅️ بازگشت", callback_data=Nav(to="menu").pack()))

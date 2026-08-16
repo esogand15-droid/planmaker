@@ -359,7 +359,9 @@ async def test_students_screen_is_empty_state_when_nobody_assigned(
         await s.commit()
     api.clear()
     await dp.feed_update(bot, callback_update(Nav(to="students").pack(), 7777, 1))
-    assert any("add-student" in t for t in api.texts()), api.texts()
+    assert any("هنوز دانش‌آموزی ثبت نکرده‌اید" in t for t in api.texts()), api.texts()
+    buttons = [b.text for m in markups(api) for row in m.inline_keyboard for b in row]
+    assert any("افزودن دانش‌آموز" in b for b in buttons), buttons
     assert api.calls("AnswerCallbackQuery")
 
 

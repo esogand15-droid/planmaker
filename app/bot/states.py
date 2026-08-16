@@ -5,11 +5,12 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class PlanFlow(StatesGroup):
-    """IDLE → SELECT_STUDENT → SELECT_WEEK → EDIT_DAY → EDIT_SLOT →
+    """IDLE → (ADD_STUDENT) → SELECT_STUDENT → SELECT_WEEK → EDIT_DAY → EDIT_SLOT →
     EDIT_ASSIGNMENTS → PREVIEW → CONFIRM → GENERATE → DONE"""
 
     select_student = State()
     search_student = State()
+    add_student = State()
     select_week = State()
     custom_week = State()
     edit_day = State()

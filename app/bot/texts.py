@@ -16,9 +16,10 @@ class Nav(CallbackData, prefix="n"):
 
 
 class StudentCB(CallbackData, prefix="st"):
-    action: str          # pick | page | search
+    action: str          # pick | card | page | search | add | invite | ask_del | del
     student_id: int = 0
     page: int = 0
+    mode: str = "pick"   # pick = choose for a plan, card = manage the student
 
 
 class WeekCB(CallbackData, prefix="wk"):
@@ -47,6 +48,20 @@ class SlotCB(CallbackData, prefix="s"):
     slot: int
 
 
+class ListCB(CallbackData, prefix="l"):
+    """Paginated lists: history / drafts / a student's own plans."""
+
+    kind: str            # history | drafts | mine | student
+    page: int = 0
+    ref: int = 0         # student id when kind == "student"
+
+
+class FileCB(CallbackData, prefix="f"):
+    action: str          # get
+    file_id: int
+    kind: str = "png"    # png | pdf
+
+
 class AssignCB(CallbackData, prefix="a"):
     action: str          # open | add | clear | done
     plan_id: int
@@ -64,16 +79,60 @@ STUDENT_MENU = "👋 سلام {name}!\n\n📚 برنامه‌های شما"
 CHOOSE_STUDENT = "👨‍🎓 <b>انتخاب دانش‌آموز</b>\n\nدانش‌آموز مورد نظر را انتخاب کنید."
 NO_STUDENTS = (
     "👨‍🎓 <b>دانش‌آموزان</b>\n\n"
-    "هنوز دانش‌آموزی به شما تخصیص داده نشده است.\n\n"
-    "افزودن دانش‌آموز توسط مدیر سیستم انجام می‌شود:\n"
-    "<code>python -m tools.manage add-student \"نام دانش‌آموز\" --advisor &lt;ID&gt; "
-    "--telegram-id &lt;TG_ID&gt;</code>\n\n"
-    "پس از افزودن، دانش‌آموز باید یک‌بار ربات را /start کند تا امکان ارسال مستقیم برنامه فراهم شود."
+    "هنوز دانش‌آموزی ثبت نکرده‌اید.\n"
+    "با دکمهٔ زیر، خودتان دانش‌آموز جدید اضافه کنید."
 )
 STUDENTS_TITLE = (
     "👨‍🎓 <b>دانش‌آموزان شما</b>\n\n"
     "تعداد: {count}\n"
-    "با انتخاب هر دانش‌آموز، ساخت برنامه برای او آغاز می‌شود."
+    "🟢 متصل به ربات · 🟡 در انتظار اتصال"
+)
+ADD_STUDENT_PROMPT = (
+    "➕ <b>دانش‌آموز جدید</b>\n\n"
+    "نام و نام خانوادگی را بفرستید.\n"
+    "اگر خواستید پایه/رشته را هم اضافه کنید، با <code>|</code> جدا کنید:\n\n"
+    "<code>علی رضایی</code>\n"
+    "<code>علی رضایی | دوازدهم تجربی</code>"
+)
+STUDENT_CREATED = (
+    "✅ <b>{name}</b> اضافه شد.\n\n"
+    "برای اینکه برنامه‌ها مستقیم به تلگرام او برود، لینک زیر را برایش بفرستید؛ "
+    "با یک‌بار باز کردن، حسابش وصل می‌شود:\n\n"
+    "{link}\n\n"
+    "بدون این کار هم می‌توانید همین حالا برایش برنامه بسازید و فایل را دستی بفرستید."
+)
+STUDENT_CARD = (
+    "👤 <b>{name}</b>\n"
+    "{grade_line}"
+    "وضعیت: {status}\n"
+    "📅 برنامه‌ها: {plans}"
+)
+STUDENT_STATUS_CONNECTED = "🟢 متصل به ربات"
+STUDENT_STATUS_PENDING = "🟡 در انتظار اتصال (لینک دعوت را بفرستید)"
+INVITE_TEXT = (
+    "🔗 <b>لینک دعوت {name}</b>\n\n"
+    "{link}\n\n"
+    "این لینک را برای دانش‌آموز بفرستید. با باز کردن آن، حسابش به شما وصل می‌شود "
+    "و برنامه‌ها مستقیم برایش ارسال خواهد شد."
+)
+INVITE_ALREADY_CONNECTED = "این دانش‌آموز از قبل به ربات متصل است."
+STUDENT_REMOVED = "🗑 دانش‌آموز از فهرست شما حذف شد. (برنامه‌های قبلی حذف نشدند)"
+CONFIRM_REMOVE_STUDENT = (
+    "حذف <b>{name}</b> از فهرست شما؟\n"
+    "برنامه‌های ساخته‌شده باقی می‌مانند، فقط دیگر در فهرست شما دیده نمی‌شود."
+)
+STUDENT_WELCOME_LINKED = (
+    "🎉 خوش آمدی <b>{name}</b>!\n\n"
+    "حساب شما به مشاورتان وصل شد. از این پس برنامه هفتگی مستقیم همین‌جا برایتان می‌آید."
+)
+INVITE_INVALID = (
+    "این لینک دعوت معتبر نیست یا قبلاً استفاده شده است.\n"
+    "از مشاور خود یک لینک تازه بخواهید."
+)
+NOT_REGISTERED = (
+    "👋 سلام!\n\n"
+    "این ربات مخصوص دانش‌آموزان و مشاوران مؤسسه <b>رتبه لند</b> است.\n"
+    "برای استفاده، از مشاور خود بخواهید لینک دعوت شما را بفرستد."
 )
 UNKNOWN_ACTION = "این دکمه دیگر معتبر نیست. لطفاً از /start دوباره شروع کنید."
 SEARCH_PROMPT = "🔎 نام دانش‌آموز را بنویسید:"

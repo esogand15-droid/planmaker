@@ -5,7 +5,8 @@ The Telegram layer only ever calls this class plus WeeklyPlanService (rendering)
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,12 +21,20 @@ class AccessDenied(Exception):
     """Raised when an advisor touches a student/plan that is not theirs."""
 
 
+class StudentError(Exception):
+    """User-facing problem while creating/managing a student."""
+
+
 class PlanManager:
-    def __init__(self, session: AsyncSession):
+    def __init__(self, session: AsyncSession, storage_root: Path | str | None = None):
         self.s = session
         self.users = UserRepository(session)
         self.plans = PlanRepository(session)
         self.audit = AuditRepository(session)
+        # artefact deletion is confined to this directory
+        from ..config import settings
+
+        self.storage_root = Path(storage_root or settings.storage_root)
 
     # ------------------------------------------------------------- access --
     async def ensure_can_edit_plan(self, actor: User, plan: WeeklyPlanDB) -> None:
@@ -53,6 +62,62 @@ class PlanManager:
         if not await self.users.is_assigned(advisor.id, student_id):
             raise AccessDenied("این دانش‌آموز به شما تخصیص داده نشده است.")
         return student
+
+    # ------------------------------------------------- student management --
+    async def create_student(
+        self, advisor: User, full_name: str, grade: str | None = None
+    ) -> User:
+        """An advisor registers their own student. Returns the new row."""
+        if advisor.role not in (Role.ADVISOR, Role.ADMIN):
+            raise AccessDenied("فقط مشاور می‌تواند دانش‌آموز اضافه کند.")
+        name = " ".join((full_name or "").split())
+        if len(name) < 2:
+            raise StudentError("نام دانش‌آموز خیلی کوتاه است.")
+        if len(name) > 80:
+            raise StudentError("نام دانش‌آموز خیلی طولانی است (حداکثر ۸۰ نویسه).")
+
+        existing = await self.users.students_of(advisor.id, query=name, limit=1)
+        if any(s.full_name == name for s in existing):
+            raise StudentError("دانش‌آموزی با همین نام در فهرست شما وجود دارد.")
+
+        student = await self.users.create_student_for_advisor(
+            advisor.id, name, grade=(grade or None)
+        )
+        await self.audit.log(
+            "student.created", actor_id=advisor.id, student_id=student.id, detail=name
+        )
+        return student
+
+    async def get_student(self, advisor: User, student_id: int) -> User:
+        return await self.ensure_owns_student(advisor, student_id)
+
+    async def new_invite(self, advisor: User, student_id: int) -> str:
+        student = await self.ensure_owns_student(advisor, student_id)
+        if student.is_connected:
+            raise StudentError("این دانش‌آموز از قبل به ربات متصل است.")
+        token = student.invite_token or await self.users.rotate_invite_token(student)
+        await self.audit.log(
+            "student.invited", actor_id=advisor.id, student_id=student.id
+        )
+        return token
+
+    async def claim_invite(self, token: str, telegram_id: int, username: str | None):
+        student = await self.users.by_invite_token(token)
+        if student is None:
+            return None
+        await self.users.claim_invite(student, telegram_id, username)
+        await self.audit.log(
+            "student.connected", actor_id=student.id, student_id=student.id
+        )
+        return student
+
+    async def remove_student(self, advisor: User, student_id: int) -> None:
+        """Detach a student from this advisor (plans and data are preserved)."""
+        student = await self.ensure_owns_student(advisor, student_id)
+        await self.users.unlink_student(advisor.id, student.id)
+        await self.audit.log(
+            "student.removed", actor_id=advisor.id, student_id=student.id
+        )
 
     # ------------------------------------------------------------ mapping --
     @staticmethod
@@ -232,10 +297,64 @@ class PlanManager:
             "plan.sent", actor_id=actor.id, plan_id=plan.id, student_id=plan.student_id
         )
 
-    async def delete_plan(self, actor: User, plan_id: int) -> None:
+    async def delete_plan(self, actor: User, plan_id: int) -> int:
+        """Delete the plan *and* its generated files. Returns files removed."""
         plan = await self.get_editable(actor, plan_id)
         student_id = plan.student_id
+        removed = remove_plan_files(plan, self.storage_root)
         await self.plans.delete(plan)
         await self.audit.log(
-            "plan.deleted", actor_id=actor.id, plan_id=plan_id, student_id=student_id
+            "plan.deleted", actor_id=actor.id, plan_id=plan_id, student_id=student_id,
+            detail=f"files_removed={removed}",
         )
+        return removed
+
+    async def purge_older_than(self, days: int) -> tuple[int, int]:
+        """Retention: drop plans (and files) whose week ended `days` ago."""
+        if days <= 0:
+            return (0, 0)
+        from ..domain.persian import today_local
+
+        cutoff = today_local() - timedelta(days=days)
+        stale = await self.plans.older_than(cutoff)
+        files = 0
+        for plan in stale:
+            files += remove_plan_files(plan, self.storage_root)
+            await self.plans.delete(plan)
+        if stale:
+            await self.audit.log(
+                "plan.purged", detail=f"plans={len(stale)} files={files} cutoff={cutoff}"
+            )
+        return (len(stale), files)
+
+
+def remove_plan_files(plan: WeeklyPlanDB, storage_root: Path | str | None = None) -> int:
+    """Delete every artefact of a plan, refusing paths outside the storage root."""
+    from ..config import settings
+
+    try:
+        root = Path(storage_root or settings.storage_root).resolve()
+    except OSError:  # pragma: no cover - unreadable storage root
+        return 0
+
+    candidates: set[str] = {p for p in (plan.image_path, plan.pdf_path) if p}
+    for record in plan.files:
+        candidates.update({record.image_path, record.pdf_path})
+
+    removed = 0
+    for raw in candidates:
+        try:
+            path = Path(raw).resolve()
+        except OSError:
+            continue
+        if not path.is_relative_to(root):
+            log.error("refusing to delete %s: outside STORAGE_ROOT", path)
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except FileNotFoundError:
+            continue
+        except OSError as exc:  # pragma: no cover - permission problems
+            log.warning("could not delete %s: %s", path, exc)
+    return removed

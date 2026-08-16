@@ -61,6 +61,8 @@ class Settings:
         default_factory=lambda: Path(os.getenv("STORAGE_ROOT", str(PACKAGE_ROOT / "generated")))
     )
     template: str = field(default_factory=lambda: os.getenv("TEMPLATE", "template_weekly_v1"))
+    timezone: str = field(default_factory=lambda: os.getenv("TIMEZONE", "Asia/Tehran"))
+    retention_days: int = field(default_factory=lambda: _int("RETENTION_DAYS", 0))
     pdf_dpi: int = field(default_factory=lambda: _int("PDF_DPI", 300))
     print_scale: float = field(default_factory=lambda: _float("PRINT_SCALE", 2.0))
     render_concurrency: int = field(default_factory=lambda: _int("RENDER_CONCURRENCY", 2))
@@ -115,6 +117,7 @@ class Settings:
             "redis": "configured" if self.redis_url else "memory",
             "render_backend": self.render_backend,
             "storage_root": str(self.storage_root),
+            "timezone": self.timezone,
             "bot_token": mask_token(self.bot_token),
             "admins": str(len(self.admin_ids)),
         }

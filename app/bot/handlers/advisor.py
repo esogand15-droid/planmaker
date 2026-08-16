@@ -3,7 +3,8 @@ preview → confirm → generate → deliver → send to student."""
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import timedelta
+from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -19,15 +20,26 @@ from ...domain.persian import (
     parse_jalali,
     saturday_of,
     to_fa_digits,
+    today_local,
     week_label,
 )
-from ...services.plan_manager import AccessDenied, PlanManager
+from ...services.plan_manager import AccessDenied, PlanManager, StudentError
 from ...services.render_queue import RenderQueue
 from ..delivery import ensure_artifacts, input_for, remember_file_id
 from .. import keyboards as kb
 from .. import texts as T
 from ..states import PlanFlow
-from ..texts import AssignCB, DayCB, Nav, PlanCB, SlotCB, StudentCB, WeekCB
+from ..texts import (
+    AssignCB,
+    DayCB,
+    FileCB,
+    ListCB,
+    Nav,
+    PlanCB,
+    SlotCB,
+    StudentCB,
+    WeekCB,
+)
 
 log = logging.getLogger(__name__)
 router = Router(name="advisor")
@@ -57,8 +69,8 @@ async def new_plan(
     if not _is_advisor(user):
         raise AccessDenied(T.ACCESS_DENIED)
     await state.set_state(PlanFlow.select_student)
-    await state.update_data(query=None)
-    await _show_students(cq, session, user, page=0, query=None)
+    await state.update_data(query=None, mode="pick")
+    await _show_students(cq, session, user, page=0, query=None, mode="pick")
 
 
 async def _list_students(manager: PlanManager, user: User, query, page, size):
@@ -78,19 +90,21 @@ async def _list_students(manager: PlanManager, user: User, query, page, size):
 
 async def _show_students(
     cq: CallbackQuery, session: AsyncSession, user: User, page: int, query: str | None,
-    *, title: str | None = None,
+    *, mode: str = "pick",
 ) -> None:
     manager = PlanManager(session)
     size = settings.students_page_size
     students, total = await _list_students(manager, user, query, page, size)
     if not students and not query:
-        await _safe_edit(cq, T.NO_STUDENTS, kb.back_only())
+        await _safe_edit(cq, T.NO_STUDENTS, kb.no_students(mode))
         await cq.answer()
         return
-    if title is None:
-        title = T.CHOOSE_STUDENT
-    await _safe_edit(cq, title.format(count=to_fa_digits(str(total))),
-                     kb.students_list(students, page, total, size))
+    title = T.STUDENTS_TITLE if mode == "card" else T.CHOOSE_STUDENT
+    await _safe_edit(
+        cq,
+        title.format(count=to_fa_digits(str(total))),
+        kb.students_list(students, page, total, size, mode=mode),
+    )
     await cq.answer()
 
 
@@ -98,12 +112,127 @@ async def _show_students(
 async def show_students(
     cq: CallbackQuery, state: FSMContext, user: User, session: AsyncSession
 ) -> None:
-    """Menu → 👨‍🎓 دانش‌آموزان (view the roster, then optionally start a plan)."""
+    """Menu → 👨‍🎓 دانش‌آموزان: the advisor's own roster."""
     if not _is_advisor(user):
         raise AccessDenied(T.ACCESS_DENIED)
-    await state.set_state(PlanFlow.select_student)
-    await state.update_data(query=None)
-    await _show_students(cq, session, user, page=0, query=None, title=T.STUDENTS_TITLE)
+    await state.clear()
+    await state.update_data(query=None, mode="card")
+    await _show_students(cq, session, user, page=0, query=None, mode="card")
+
+
+@router.callback_query(StudentCB.filter(F.action == "add"))
+async def add_student_prompt(
+    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext, user: User
+) -> None:
+    if not _is_advisor(user):
+        raise AccessDenied(T.ACCESS_DENIED)
+    await state.set_state(PlanFlow.add_student)
+    await _safe_edit(cq, T.ADD_STUDENT_PROMPT, kb.back_only("students"))
+    await cq.answer()
+
+
+@router.message(PlanFlow.add_student, F.text)
+async def add_student_input(
+    message: Message, state: FSMContext, user: User, session: AsyncSession
+) -> None:
+    """`نام` or `نام | پایه` — the advisor registers their own student."""
+    raw = message.text.strip()
+    if raw.startswith("/"):
+        return
+    name, _, grade = raw.partition("|")
+    manager = PlanManager(session)
+    try:
+        student = await manager.create_student(user, name, grade.strip() or None)
+    except StudentError as exc:
+        await message.answer(f"⚠️ {exc}", reply_markup=kb.back_only("students"))
+        return
+
+    await state.clear()
+    link = await _invite_link(message.bot, student.invite_token)
+    await message.answer(
+        T.STUDENT_CREATED.format(name=student.full_name, link=link),
+        reply_markup=kb.student_created(student),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+async def _invite_link(bot, token: str | None) -> str:
+    if not token:
+        return "—"
+    me = await bot.me()
+    return f"https://t.me/{me.username}?start=inv_{token}"
+
+
+@router.callback_query(StudentCB.filter(F.action == "card"))
+async def student_card(
+    cq: CallbackQuery, callback_data: StudentCB, user: User, session: AsyncSession
+) -> None:
+    manager = PlanManager(session)
+    student = await manager.get_student(user, callback_data.student_id)
+    plans = await manager.plans.count_history(student_id=student.id)
+    grade_line = f"📚 {student.grade}\n" if student.grade else ""
+    status = (
+        T.STUDENT_STATUS_CONNECTED if student.telegram_id else T.STUDENT_STATUS_PENDING
+    )
+    await _safe_edit(
+        cq,
+        T.STUDENT_CARD.format(
+            name=student.full_name,
+            grade_line=grade_line,
+            status=status,
+            plans=to_fa_digits(str(plans)),
+        ),
+        kb.student_card(student),
+    )
+    await cq.answer()
+
+
+@router.callback_query(StudentCB.filter(F.action == "invite"))
+async def student_invite(
+    cq: CallbackQuery, callback_data: StudentCB, user: User, session: AsyncSession
+) -> None:
+    manager = PlanManager(session)
+    try:
+        token = await manager.new_invite(user, callback_data.student_id)
+    except StudentError as exc:
+        await cq.answer(str(exc), show_alert=True)
+        return
+    student = await manager.get_student(user, callback_data.student_id)
+    link = await _invite_link(cq.bot, token)
+    await cq.message.answer(
+        T.INVITE_TEXT.format(name=student.full_name, link=link),
+        reply_markup=kb.student_card(student),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+    await cq.answer()
+
+
+@router.callback_query(StudentCB.filter(F.action == "ask_del"))
+async def student_ask_delete(
+    cq: CallbackQuery, callback_data: StudentCB, user: User, session: AsyncSession
+) -> None:
+    manager = PlanManager(session)
+    student = await manager.get_student(user, callback_data.student_id)
+    await _safe_edit(
+        cq,
+        T.CONFIRM_REMOVE_STUDENT.format(name=student.full_name),
+        kb.confirm_remove_student(student.id),
+    )
+    await cq.answer()
+
+
+@router.callback_query(StudentCB.filter(F.action == "del"))
+async def student_delete(
+    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext,
+    user: User, session: AsyncSession,
+) -> None:
+    manager = PlanManager(session)
+    await manager.remove_student(user, callback_data.student_id)
+    await cq.answer(T.STUDENT_REMOVED, show_alert=True)
+    await state.update_data(query=None, mode="card")
+    await _show_students(cq, session, user, page=0, query=None, mode="card")
 
 
 @router.callback_query(StudentCB.filter(F.action == "page"))
@@ -112,13 +241,20 @@ async def students_page(
     user: User, session: AsyncSession,
 ) -> None:
     data = await state.get_data()
-    await _show_students(cq, session, user, callback_data.page, data.get("query"))
+    await _show_students(
+        cq, session, user, callback_data.page, data.get("query"),
+        mode=callback_data.mode,
+    )
 
 
 @router.callback_query(StudentCB.filter(F.action == "search"))
-async def students_search(cq: CallbackQuery, state: FSMContext) -> None:
+async def students_search(
+    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext
+) -> None:
     await state.set_state(PlanFlow.search_student)
-    await cq.message.edit_text(T.SEARCH_PROMPT, reply_markup=kb.back_only("new"))
+    await state.update_data(mode=callback_data.mode)
+    back = "students" if callback_data.mode == "card" else "new"
+    await _safe_edit(cq, T.SEARCH_PROMPT, kb.back_only(back))
     await cq.answer()
 
 
@@ -127,17 +263,23 @@ async def students_search_input(
     message: Message, state: FSMContext, user: User, session: AsyncSession
 ) -> None:
     query = message.text.strip()
+    data = await state.get_data()
+    mode = data.get("mode", "pick")
     await state.update_data(query=query)
     await state.set_state(PlanFlow.select_student)
     manager = PlanManager(session)
     size = settings.students_page_size
     students, total = await _list_students(manager, user, query, 0, size)
     if not students:
-        await message.answer("نتیجه‌ای پیدا نشد.", reply_markup=kb.back_only("new"))
+        await message.answer(
+            "نتیجه‌ای پیدا نشد.",
+            reply_markup=kb.back_only("students" if mode == "card" else "new"),
+        )
         return
+    title = T.STUDENTS_TITLE if mode == "card" else T.CHOOSE_STUDENT
     await message.answer(
-        T.CHOOSE_STUDENT,
-        reply_markup=kb.students_list(students, 0, total, size),
+        title.format(count=to_fa_digits(str(total))),
+        reply_markup=kb.students_list(students, 0, total, size, mode=mode),
         parse_mode="HTML",
     )
 
@@ -153,7 +295,7 @@ async def student_picked(
     await state.update_data(student_id=student.id)
     await cq.message.edit_text(
         T.CHOOSE_WEEK.format(student=student.full_name),
-        reply_markup=kb.week_choices(student.id, saturday_of(date.today())),
+        reply_markup=kb.week_choices(student.id, saturday_of(today_local())),
         parse_mode="HTML",
     )
     await cq.answer()
@@ -164,7 +306,7 @@ async def week_picked(
     cq: CallbackQuery, callback_data: WeekCB, state: FSMContext,
     user: User, session: AsyncSession,
 ) -> None:
-    start = saturday_of(date.today()) + timedelta(days=7 * callback_data.offset)
+    start = saturday_of(today_local()) + timedelta(days=7 * callback_data.offset)
     await _open_or_create(cq, state, user, session, callback_data.student_id, start)
 
 
@@ -661,39 +803,113 @@ async def send_to_student(
 # ------------------------------------------------------ history / drafts ----
 @router.callback_query(Nav.filter(F.to.in_({"history", "drafts"})))
 async def list_plans(
-    cq: CallbackQuery, callback_data: Nav, user: User, session: AsyncSession
+    cq: CallbackQuery, callback_data: Nav, state: FSMContext,
+    user: User, session: AsyncSession,
 ) -> None:
+    await state.clear()
+    await _render_list(cq, session, user, kind=callback_data.to, page=0)
+
+
+@router.callback_query(ListCB.filter())
+async def paginate_list(
+    cq: CallbackQuery, callback_data: ListCB, user: User, session: AsyncSession
+) -> None:
+    await _render_list(
+        cq, session, user,
+        kind=callback_data.kind, page=callback_data.page, ref=callback_data.ref,
+    )
+
+
+async def _render_list(
+    cq: CallbackQuery, session: AsyncSession, user: User, *,
+    kind: str, page: int, ref: int = 0,
+) -> None:
+    """history | drafts | mine (student's own) | student (one student's plans)."""
     manager = PlanManager(session)
     size = settings.plans_page_size
-    if callback_data.to == "drafts":
-        plans = await manager.plans.drafts_of(user.id, limit=size)
-        total = len(plans)
-        empty = T.DRAFTS_EMPTY
-    else:
-        plans = await manager.plans.history(advisor_id=user.id, limit=size)
-        total = await manager.plans.count_history(advisor_id=user.id)
+    offset = page * size
+
+    if kind == "drafts":
+        plans = await manager.plans.drafts_of(user.id, limit=size, offset=offset)
+        total = await manager.plans.count_drafts_of(user.id)
+        title, empty = "📝 <b>پیش‌نویس‌ها</b>", T.DRAFTS_EMPTY
+    elif kind == "mine":
+        plans = await manager.plans.history(
+            student_id=user.id, limit=size, offset=offset, only_generated=True
+        )
+        total = await manager.plans.count_history(student_id=user.id, only_generated=True)
+        title, empty = "📆 <b>برنامه‌های شما</b>", T.STUDENT_NO_PLAN
+    elif kind == "student":
+        student = await manager.get_student(user, ref)
+        plans = await manager.plans.history(student_id=student.id, limit=size, offset=offset)
+        total = await manager.plans.count_history(student_id=student.id)
+        title = f"📂 <b>برنامه‌های {student.full_name}</b>"
         empty = T.HISTORY_EMPTY
+    else:
+        plans = await manager.plans.history(advisor_id=user.id, limit=size, offset=offset)
+        total = await manager.plans.count_history(advisor_id=user.id)
+        title, empty = "📂 <b>برنامه‌های قبلی</b>", T.HISTORY_EMPTY
+
     if not plans:
-        await _safe_edit(cq, empty, kb.back_only())
+        back = (
+            kb.student_card(await manager.get_student(user, ref))
+            if kind == "student" and ref
+            else kb.back_only()
+        )
+        await _safe_edit(cq, empty, back)
         await cq.answer()
         return
-    title = "📝 <b>پیش‌نویس‌ها</b>" if callback_data.to == "drafts" else "📂 <b>برنامه‌های قبلی</b>"
-    await _safe_edit(cq, title, kb.plan_list(plans, 0, total, size))
+
+    await _safe_edit(
+        cq, title,
+        kb.plan_list(plans, page, total, size, kind=kind, ref=ref,
+                     student_view=(kind == "mine")),
+    )
     await cq.answer()
 
 
-@router.callback_query(PlanCB.filter(F.action == "hpage"))
-async def history_page(
+@router.callback_query(PlanCB.filter(F.action == "versions"))
+async def plan_versions(
     cq: CallbackQuery, callback_data: PlanCB, user: User, session: AsyncSession
 ) -> None:
     manager = PlanManager(session)
-    size = settings.plans_page_size
-    plans = await manager.plans.history(
-        advisor_id=user.id, limit=size, offset=callback_data.page * size
-    )
-    total = await manager.plans.count_history(advisor_id=user.id)
+    plan = await manager.get_viewable(user, callback_data.plan_id)
+    files = await manager.plans.files_of(plan.id)
+    if not files:
+        await cq.answer("نسخه‌ای ثبت نشده است.", show_alert=True)
+        return
     await _safe_edit(
-        cq, "📂 <b>برنامه‌های قبلی</b>", kb.plan_list(plans, callback_data.page, total, size)
+        cq,
+        f"🗂 <b>نسخه‌های تولیدشده</b>\n{kb.plan_header(plan)}",
+        kb.versions_list(files, plan.id),
+    )
+    await cq.answer()
+
+
+@router.callback_query(FileCB.filter(F.action == "get"))
+async def fetch_version_file(
+    cq: CallbackQuery, callback_data: FileCB, user: User, session: AsyncSession
+) -> None:
+    manager = PlanManager(session)
+    record = await manager.plans.file_by_id(callback_data.file_id)
+    if record is None:
+        await cq.answer("این نسخه دیگر موجود نیست.", show_alert=True)
+        return
+    plan = await manager.get_viewable(user, record.plan_id)  # authorization
+    path = Path(record.image_path if callback_data.kind == "png" else record.pdf_path)
+    try:
+        inside = path.resolve().is_relative_to(Path(settings.storage_root).resolve())
+    except OSError:
+        inside = False
+    if not inside or not path.exists():
+        await cq.answer(
+            "فایل این نسخه روی سرور موجود نیست؛ می‌توانید دوباره تولید کنید.",
+            show_alert=True,
+        )
+        return
+    await cq.message.answer_document(
+        FSInputFile(path),
+        caption=f"{kb.plan_header(plan)}\n🧩 نسخه {to_fa_digits(str(record.version))}",
     )
     await cq.answer()
 
@@ -733,10 +949,10 @@ async def delete_plan(
     user: User, session: AsyncSession,
 ) -> None:
     manager = PlanManager(session)
-    await manager.delete_plan(user, callback_data.plan_id)
+    removed = await manager.delete_plan(user, callback_data.plan_id)
     await state.clear()
     await _safe_edit(cq, T.DELETED, kb.advisor_menu())
-    await cq.answer()
+    await cq.answer(f"{to_fa_digits(str(removed))} فایل هم پاک شد." if removed else None)
 
 
 # ------------------------------------------------------------- utilities ----

@@ -55,9 +55,10 @@ async def my_history(cq: CallbackQuery, user: User, session: AsyncSession) -> No
         await cq.answer(T.STUDENT_NO_PLAN, show_alert=True)
         return
     total = await manager.plans.count_history(student_id=user.id, only_generated=True)
+    # kind="mine" keeps pagination scoped to the student's own plans
     await cq.message.edit_text(
         "📆 برنامه‌های قبلی شما",
-        reply_markup=kb.plan_list(plans, 0, total, size, student_view=True),
+        reply_markup=kb.plan_list(plans, 0, total, size, kind="mine", student_view=True),
     )
     await cq.answer()
 

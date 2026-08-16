@@ -64,6 +64,16 @@ class User(Base, TimestampMixin):
     role: Mapped[Role] = mapped_column(Enum(Role, native_enum=False), default=Role.STUDENT)
     grade: Mapped[str | None] = mapped_column(String(64))  # پایه/رشته دانش‌آموز
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    #: one-time token used by an advisor-created student to claim their account
+    invite_token: Mapped[str | None] = mapped_column(String(32), unique=True, index=True)
+    created_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+    @property
+    def is_connected(self) -> bool:
+        """True once the person has opened the bot and claimed the account."""
+        return self.telegram_id is not None
 
     advisor_links: Mapped[list["AdvisorStudent"]] = relationship(
         back_populates="student",

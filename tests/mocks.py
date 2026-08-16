@@ -43,6 +43,10 @@ class MockedSession(BaseSession):
         name = type(method).__name__
         if name in {"SendMessage", "SendPhoto", "SendDocument", "EditMessageText"}:
             return self._message(bot, method, name)
+        if name == "GetMe":
+            return TgUser(
+                id=BOT_ID, is_bot=True, first_name="RotbeLand", username="rotbeland_test_bot"
+            )
         if name in {"AnswerCallbackQuery", "DeleteWebhook"}:
             return True
         return True

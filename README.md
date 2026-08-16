@@ -9,7 +9,7 @@
 |---|---|
 | Template Version | `rotbeland-weekly-v1` |
 | Renderer Version | `html-chromium-1.0.0` (اصلی) · `pillow-1.0.0` (fallback) |
-| Tests | **207 passed** (Renderer 26 · Bot Flow 13 · Security 36 · Deployment 19 · UX 113) |
+| Tests | **236 passed** (Renderer 26 · Bot Flow 13 · Security 36 · Deployment 19 · UX 114 · Students 28) |
 | Stack | Python 3.12 · aiogram 3 · SQLAlchemy 2 async · PostgreSQL · Alembic · Pillow/libraqm · Playwright |
 
 ---
@@ -54,6 +54,8 @@
 ## 2. Features
 
 **مشاور**
+- **مدیریت دانش‌آموزان بدون نیاز به مدیر سیستم:** افزودن دانش‌آموز از داخل ربات،
+  دریافت لینک دعوت یک‌بارمصرف، مشاهده وضعیت اتصال، حذف از فهرست
 - ساخت برنامه هفتگی: انتخاب دانش‌آموز (جستجو + صفحه‌بندی)، انتخاب هفته (این هفته / بعد / تاریخ شمسی دلخواه)
 - ورود سریع فعالیت: `زیست | گوارش | ۴۰ تست | ۹۰ دقیقه` با رفتن خودکار به خانه بعد
 - تکالیف چندخطی در یک پیام
@@ -151,6 +153,8 @@ python -m app.bot.main
 | `LOG_LEVEL` / `SQL_ECHO` | ➖ | `INFO` / `false` | لاگ |
 | `RUN_MIGRATIONS_ON_START` | ➖ | `false` | اجرای migration در startup (برای compose/VPS) |
 | `TEMPLATE` | ➖ | `template_weekly_v1` | نسخه قالب |
+| `TIMEZONE` | ➖ | `Asia/Tehran` | مبنای «امروز/این هفته» (سرور Railway روی UTC است) |
+| `RETENTION_DAYS` | ➖ | `0` | پیش‌فرض دستور `manage cleanup` (صفر = نگه‌داری همیشگی) |
 
 > هیچ Secretی در سورس، تست، README یا لاگ وجود ندارد. تستِ
 > `test_no_secrets_committed_in_repository` کل درخت پروژه را جاروب می‌کند.
@@ -278,15 +282,34 @@ TELEGRAM_BOT_TOKEN=xxx docker compose up -d --build
 
 ## 16. First Admin/Advisor Setup
 
+فقط **مشاورها** با خط فرمان ساخته می‌شوند؛ دانش‌آموزان را خودِ مشاور از داخل ربات
+اضافه می‌کند.
+
 ```bash
-python -m tools.manage init-db                 # فقط توسعه؛ Production از alembic استفاده کند
 python -m tools.manage add-advisor "علی مرادی" --telegram-id 123456789
-python -m tools.manage add-student "زهرا احمدی" --advisor 1 --telegram-id 987654321
-python -m tools.manage link --advisor 1 --student 2
 python -m tools.manage list-users
 python -m tools.manage list-plans --advisor 1
 python -m tools.manage audit
+python -m tools.manage cleanup --days 180 --dry-run   # نگه‌داری فایل‌ها
 ```
+
+شناسه تلگرام هر فرد را می‌توان با فرستادن `/id` به همین ربات گرفت.
+
+### جریان افزودن دانش‌آموز (سمت مشاور، بدون خط فرمان)
+
+```
+منو → 👨‍🎓 دانش‌آموزان → ➕ افزودن دانش‌آموز
+     → «علی رضایی»  یا  «علی رضایی | دوازدهم تجربی»
+     → ربات یک لینک دعوت می‌دهد:  https://t.me/<bot>?start=inv_<token>
+     → مشاور لینک را برای دانش‌آموز می‌فرستد
+     → دانش‌آموز لینک را باز می‌کند ⇒ حسابش به همان رکورد وصل می‌شود
+```
+
+نکته‌ها:
+* لینک **یک‌بارمصرف** است و پس از استفاده باطل می‌شود (از کارت دانش‌آموز می‌توان لینک تازه گرفت).
+* بدون اتصال هم می‌توان برای دانش‌آموز برنامه ساخت؛ فقط ارسال مستقیم غیرفعال است.
+* اگر دانش‌آموز قبلاً ربات را باز کرده باشد، هنگام Claim رکورد تکراری‌اش ادغام می‌شود.
+* افراد ناشناس (بدون دعوت) در دیتابیس ثبت نمی‌شوند و پیام راهنما می‌گیرند.
 
 | آرگومان | توضیح |
 |---|---|
@@ -307,6 +330,8 @@ python -m tools.manage audit
   انجام می‌شود و حتی اگر فایل محلی از بین برود کار می‌کند.
 - **Ephemeral FS**: اگر فایل و file_id هر دو نبودند، برنامه از روی داده‌های دیتابیس
   **دوباره رندر** می‌شود. منبع حقیقت همیشه دیتابیس است، نه فایل.
+- **حذف برنامه، فایل‌هایش را هم پاک می‌کند** (فقط داخل `STORAGE_ROOT`).
+- پاک‌سازی دوره‌ای: `python -m tools.manage cleanup --days 180` (با `--dry-run` برای پیش‌بینی).
 - برای نگه‌داری بلندمدت روی Railway: Volume روی `/data/generated`. برای مقیاس بزرگ‌تر
   می‌توان `plan_service` را به S3/R2 وصل کرد (نقطه اتصال: `WeeklyPlanService._dir_for`).
 

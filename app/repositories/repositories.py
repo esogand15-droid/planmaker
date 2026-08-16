@@ -1,7 +1,8 @@
 """Data access layer. All SQL lives here — services and handlers stay clean."""
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+import secrets
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,6 +51,73 @@ class UserRepository:
             user.full_name = full_name
         await self.s.flush()
         return user
+
+    async def create_student_for_advisor(
+        self,
+        advisor_id: int,
+        full_name: str,
+        *,
+        grade: str | None = None,
+        telegram_id: int | None = None,
+    ) -> User:
+        """Advisor-driven onboarding: create the student and link them at once.
+
+        No admin, no shell access. If the Telegram id is unknown (the normal
+        case) an invite token is generated instead; the student claims the
+        account by opening the deep link.
+        """
+        student = User(
+            full_name=full_name.strip(),
+            role=Role.STUDENT,
+            grade=(grade or None),
+            telegram_id=telegram_id,
+            created_by_id=advisor_id,
+            invite_token=None if telegram_id else secrets.token_urlsafe(12)[:22],
+        )
+        self.s.add(student)
+        await self.s.flush()
+        await self.link_student(advisor_id, student.id)
+        return student
+
+    async def rotate_invite_token(self, student: User) -> str:
+        student.invite_token = secrets.token_urlsafe(12)[:22]
+        await self.s.flush()
+        return student.invite_token
+
+    async def by_invite_token(self, token: str) -> User | None:
+        res = await self.s.execute(select(User).where(User.invite_token == token))
+        return res.scalar_one_or_none()
+
+    async def claim_invite(self, student: User, telegram_id: int, username: str | None) -> User:
+        """Bind a Telegram account to an advisor-created student row."""
+        duplicate = await self.by_telegram_id(telegram_id)
+        if duplicate is not None and duplicate.id != student.id:
+            # a stray auto-created row for the same person: fold it away
+            duplicate.telegram_id = None
+            duplicate.is_active = False
+            await self.s.flush()
+        student.telegram_id = telegram_id
+        student.username = username
+        student.invite_token = None
+        await self.s.flush()
+        return student
+
+    async def unlink_student(self, advisor_id: int, student_id: int) -> None:
+        await self.s.execute(
+            delete(AdvisorStudent).where(
+                AdvisorStudent.advisor_id == advisor_id,
+                AdvisorStudent.student_id == student_id,
+            )
+        )
+        await self.s.flush()
+
+    async def advisors_of(self, student_id: int) -> list[User]:
+        stmt = (
+            select(User)
+            .join(AdvisorStudent, AdvisorStudent.advisor_id == User.id)
+            .where(AdvisorStudent.student_id == student_id)
+        )
+        return list((await self.s.execute(stmt)).scalars())
 
     async def link_student(self, advisor_id: int, student_id: int) -> AdvisorStudent:
         existing = await self.s.execute(
@@ -155,7 +223,9 @@ class PlanRepository:
         await self.s.refresh(plan, ["student", "advisor", "days", "assignments", "files"])
         return plan
 
-    async def drafts_of(self, advisor_id: int, limit: int = 10) -> list[WeeklyPlanDB]:
+    async def drafts_of(
+        self, advisor_id: int, limit: int = 10, offset: int = 0
+    ) -> list[WeeklyPlanDB]:
         stmt = (
             select(WeeklyPlanDB)
             .where(
@@ -164,7 +234,34 @@ class PlanRepository:
             )
             .order_by(WeeklyPlanDB.updated_at.desc())
             .limit(limit)
+            .offset(offset)
         )
+        return list((await self.s.execute(stmt)).scalars())
+
+    async def count_drafts_of(self, advisor_id: int) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(WeeklyPlanDB)
+            .where(
+                WeeklyPlanDB.advisor_id == advisor_id,
+                WeeklyPlanDB.status == PlanStatusDB.DRAFT,
+            )
+        )
+        return int((await self.s.execute(stmt)).scalar_one())
+
+    async def files_of(self, plan_id: int) -> list[PlanFile]:
+        stmt = (
+            select(PlanFile)
+            .where(PlanFile.plan_id == plan_id)
+            .order_by(PlanFile.version.desc(), PlanFile.id.desc())
+        )
+        return list((await self.s.execute(stmt)).scalars())
+
+    async def file_by_id(self, file_id: int) -> PlanFile | None:
+        return await self.s.get(PlanFile, file_id)
+
+    async def older_than(self, cutoff: date) -> list[WeeklyPlanDB]:
+        stmt = select(WeeklyPlanDB).where(WeeklyPlanDB.week_end < cutoff)
         return list((await self.s.execute(stmt)).scalars())
 
     async def history(
