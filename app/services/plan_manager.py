@@ -10,9 +10,14 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.models import PlanStatusDB, Role, User, WeeklyPlanDB
+from ..db.models import AccessRequest, PlanStatusDB, Role, User, WeeklyPlanDB
 from ..domain.models import Activity, Assignment, PlanDay, WeeklyPlan
-from ..repositories.repositories import AuditRepository, PlanRepository, UserRepository
+from ..repositories.repositories import (
+    AccessRequestRepository,
+    AuditRepository,
+    PlanRepository,
+    UserRepository,
+)
 from .invites import InviteOutcome, InviteResult, blocks_invite
 
 log = logging.getLogger(__name__)
@@ -32,6 +37,7 @@ class PlanManager:
         self.users = UserRepository(session)
         self.plans = PlanRepository(session)
         self.audit = AuditRepository(session)
+        self.requests = AccessRequestRepository(session)
         # artefact deletion is confined to this directory
         from ..config import settings
 
@@ -72,6 +78,111 @@ class PlanManager:
         if not await self.users.is_assigned(advisor.id, student_id):
             raise AccessDenied("این دانش‌آموز به شما تخصیص داده نشده است.")
         return student
+
+    # ------------------------------------------------- access requests ----
+    async def approve_request(
+        self,
+        admin: User,
+        request_id: int,
+        role: Role,
+        *,
+        advisor_id: int | None = None,
+    ) -> User:
+        """Grant a role to someone who opened the bot without an invite.
+
+        Only an admin may do this — never an invite link, never `/start`.
+        """
+        from ..db.models import RequestStatus
+        from ..security import is_admin
+
+        if not is_admin(admin, admin.telegram_id):
+            raise AccessDenied("این عملیات فقط توسط مدیر انجام می‌شود.")
+        if role not in (Role.ADVISOR, Role.STUDENT):
+            raise StudentError("نقش انتخابی معتبر نیست.")
+
+        request = await self.requests.by_id(request_id)
+        if request is None:
+            raise StudentError("درخواست پیدا نشد.")
+        if request.status is RequestStatus.APPROVED:
+            raise StudentError("این درخواست قبلاً تأیید شده است.")
+
+        existing = await self.users.by_telegram_id(request.telegram_id)
+        if existing is not None:
+            raise StudentError("این شخص از قبل حساب دارد.")
+
+        user = await self.users.create(
+            full_name=request.full_name,
+            role=role,
+            telegram_id=request.telegram_id,
+            username=request.username,
+        )
+        if role is Role.STUDENT:
+            target = advisor_id or admin.id
+            await self.users.link_student(target, user.id)
+
+        request.status = RequestStatus.APPROVED
+        request.handled_by_id = admin.id
+        request.granted_role = role
+        await self.s.flush()
+
+        await self.audit.log(
+            "access.approved",
+            actor_id=admin.id,
+            student_id=user.id if role is Role.STUDENT else None,
+            detail=f"{request.full_name} → {role.value} (tg={request.telegram_id})",
+        )
+        log.info(
+            "access request %s approved as %s by admin %s",
+            request_id, role.value, admin.id,
+        )
+        return user
+
+    async def reject_request(self, admin: User, request_id: int) -> "AccessRequest":
+        from ..db.models import RequestStatus
+        from ..security import is_admin
+
+        if not is_admin(admin, admin.telegram_id):
+            raise AccessDenied("این عملیات فقط توسط مدیر انجام می‌شود.")
+        request = await self.requests.by_id(request_id)
+        if request is None:
+            raise StudentError("درخواست پیدا نشد.")
+        request.status = RequestStatus.REJECTED
+        request.handled_by_id = admin.id
+        await self.s.flush()
+        await self.audit.log(
+            "access.rejected", actor_id=admin.id,
+            detail=f"{request.full_name} (tg={request.telegram_id})",
+        )
+        return request
+
+    async def create_advisor_by_telegram_id(
+        self, admin: User, full_name: str, telegram_id: int
+    ) -> User:
+        """Add an advisor straight from the panel (no shell needed)."""
+        from ..security import is_admin
+
+        if not is_admin(admin, admin.telegram_id):
+            raise AccessDenied("این عملیات فقط توسط مدیر انجام می‌شود.")
+        name = " ".join((full_name or "").split())
+        if len(name) < 2:
+            raise StudentError("نام مشاور خیلی کوتاه است.")
+        if await self.users.by_telegram_id(telegram_id) is not None:
+            raise StudentError("این شناسه تلگرام قبلاً ثبت شده است.")
+        advisor = await self.users.create(
+            full_name=name, role=Role.ADVISOR, telegram_id=telegram_id
+        )
+        # if the person had been waiting in the queue, close their request
+        request = await self.requests.by_telegram_id(telegram_id)
+        if request is not None:
+            from ..db.models import RequestStatus
+
+            request.status = RequestStatus.APPROVED
+            request.handled_by_id = admin.id
+            request.granted_role = Role.ADVISOR
+        await self.audit.log(
+            "advisor.created", actor_id=admin.id, detail=f"{name} (tg={telegram_id})"
+        )
+        return advisor
 
     # ------------------------------------------------- student management --
     async def create_student(

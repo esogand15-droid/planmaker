@@ -612,6 +612,7 @@ def plan_header(plan: WeeklyPlanDB) -> str:
 # ─────────────────────────────── admin panel ────────────────────────────────
 def admin_menu() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    kb.button(text="🙋 درخواست‌های دسترسی", callback_data=AdminCB(action="requests"))
     kb.button(text="👥 مدیریت مشاوران", callback_data=AdminCB(action="advisors"))
     kb.button(text="👨‍🎓 مدیریت دانش‌آموزان", callback_data=AdminCB(action="students"))
     kb.button(text="📋 مدیریت برنامه‌ها", callback_data=AdminCB(action="plans"))
@@ -623,7 +624,7 @@ def admin_menu() -> InlineKeyboardMarkup:
     kb.button(text="🤖 وضعیت ربات", callback_data=AdminCB(action="bot"))
     kb.button(text="⚙️ تنظیمات مدیریت", callback_data=AdminCB(action="settings"))
     kb.button(text="⬅️ پنل مشاور", callback_data=Nav(to="menu"))
-    kb.adjust(2, 2, 2, 2, 2, 1)
+    kb.adjust(1, 1, 2, 2, 2, 2, 1)
     return kb.as_markup()
 
 
@@ -653,6 +654,47 @@ def _admin_pager(kb: InlineKeyboardBuilder, action: str, page: int, total: int,
     kb.row(*row)
 
 
+def admin_requests(requests, page: int, total: int, size: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for request in requests:
+        kb.row(InlineKeyboardButton(
+            text=f"🙋 {request.full_name}"[:34],
+            callback_data=AdminCB(action="request", ref=request.id).pack()))
+    _admin_pager(kb, "requests", page, total, size)
+    kb.row(InlineKeyboardButton(text="⬅️ پنل مدیریت",
+                                callback_data=AdminCB(action="home").pack()))
+    return kb.as_markup()
+
+
+def admin_request_card(request_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(
+        text="👨‍🏫 تأیید به‌عنوان مشاور",
+        callback_data=AdminCB(action="grant", ref=request_id, arg="advisor").pack()))
+    kb.row(InlineKeyboardButton(
+        text="👨‍🎓 تأیید به‌عنوان دانش‌آموز",
+        callback_data=AdminCB(action="grant_student", ref=request_id).pack()))
+    kb.row(InlineKeyboardButton(
+        text="🚫 رد درخواست",
+        callback_data=AdminCB(action="reject", ref=request_id).pack()))
+    kb.row(InlineKeyboardButton(text="⬅️ فهرست درخواست‌ها",
+                                callback_data=AdminCB(action="requests").pack()))
+    return kb.as_markup()
+
+
+def admin_pick_advisor_for_request(candidates, request_id: int) -> InlineKeyboardMarkup:
+    """Which advisor should the approved student belong to?"""
+    kb = InlineKeyboardBuilder()
+    for advisor in candidates:
+        kb.row(InlineKeyboardButton(
+            text=f"👨‍🏫 {advisor.full_name}"[:34],
+            callback_data=AdminCB(action="grant", ref=request_id,
+                                  arg="student", page=advisor.id).pack()))
+    kb.row(InlineKeyboardButton(text="❌ انصراف",
+                                callback_data=AdminCB(action="request", ref=request_id).pack()))
+    return kb.as_markup()
+
+
 def admin_advisors(advisors, page: int, total: int, size: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for advisor, students, _plans in advisors:
@@ -661,12 +703,22 @@ def admin_advisors(advisors, page: int, total: int, size: int) -> InlineKeyboard
             text=f"{dot} {advisor.full_name} · {to_fa_digits(str(students))} دانش‌آموز"[:34],
             callback_data=AdminCB(action="advisor", ref=advisor.id).pack()))
     _admin_pager(kb, "advisors", page, total, size)
+    kb.row(InlineKeyboardButton(text="➕ افزودن مشاور",
+                                callback_data=AdminCB(action="add_advisor").pack()))
     kb.row(
         InlineKeyboardButton(text="🔎 جستجوی مشاور",
                              callback_data=AdminCB(action="search_advisor").pack()),
         InlineKeyboardButton(text="⬅️ پنل مدیریت",
                              callback_data=AdminCB(action="home").pack()),
     )
+    return kb.as_markup()
+
+
+def admin_no_advisors() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ افزودن مشاور", callback_data=AdminCB(action="add_advisor"))
+    kb.button(text="⬅️ پنل مدیریت", callback_data=AdminCB(action="home"))
+    kb.adjust(1, 1)
     return kb.as_markup()
 
 

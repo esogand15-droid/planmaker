@@ -34,6 +34,7 @@ PAGE = 6
 
 
 class AdminFlow(StatesGroup):
+    add_advisor = State()
     edit_advisor = State()
     edit_student = State()
     search_advisor = State()
@@ -76,9 +77,11 @@ async def admin_home(
     from app import __version__
 
     stats = await AdminService(session).db_stats()
+    pending = await PlanManager(session).requests.count_pending()
     await _edit(
         cq,
-        T.ADMIN_MENU.format(
+        (f"🙋 <b>{fa(pending)} درخواست دسترسی در انتظار بررسی</b>\n\n" if pending else "")
+        + T.ADMIN_MENU.format(
             version=__version__,
             env=settings.environment,
             advisors=fa(stats["advisors"]),
@@ -88,6 +91,179 @@ async def admin_home(
         kb.admin_menu(),
     )
     await cq.answer()
+
+
+# ────────────────────────────── access requests ─────────────────────────────
+@router.callback_query(AdminCB.filter(F.action == "requests"))
+async def admin_requests(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    """People who opened the bot without an invite, waiting for a role."""
+    _guard(cq, user)
+    manager = PlanManager(session)
+    total = await manager.requests.count_pending()
+    rows = await manager.requests.pending(PAGE, callback_data.page * PAGE)
+    if not rows:
+        await _edit(cq, T.ADMIN_NO_REQUESTS, kb.admin_back())
+        await cq.answer()
+        return
+    body = [T.ADMIN_REQUESTS.format(count=fa(total)), ""]
+    for request in rows:
+        handle = f"@{request.username}" if request.username else "—"
+        body.append(
+            f"🙋 <b>{request.full_name}</b> · {handle}\n"
+            f"   <code>{request.telegram_id}</code> · "
+            f"{fa(request.visits)} مراجعه"
+        )
+    await _edit(cq, "\n".join(body),
+                kb.admin_requests(rows, callback_data.page, total, PAGE))
+    await cq.answer()
+
+
+@router.callback_query(AdminCB.filter(F.action == "request"))
+async def admin_request_card(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    request = await PlanManager(session).requests.by_id(callback_data.ref)
+    if request is None:
+        await cq.answer("درخواست پیدا نشد.", show_alert=True)
+        return
+    await _edit(
+        cq,
+        T.ADMIN_REQUEST_CARD.format(
+            name=request.full_name,
+            username=f"@{request.username}" if request.username else "—",
+            telegram=request.telegram_id,
+            visits=fa(request.visits),
+            last_seen=request.last_seen_at.strftime("%Y-%m-%d %H:%M")
+            if request.last_seen_at else "—",
+        ),
+        kb.admin_request_card(request.id),
+    )
+    await cq.answer()
+
+
+@router.callback_query(AdminCB.filter(F.action == "grant_student"))
+async def admin_pick_advisor_for_request(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    candidates = await AdminService(session).advisor_candidates()
+    if not candidates:
+        await cq.answer("مشاوری برای تخصیص وجود ندارد.", show_alert=True)
+        return
+    await _edit(cq, T.ADMIN_PICK_TARGET_ADVISOR,
+                kb.admin_pick_advisor_for_request(candidates, callback_data.ref))
+    await cq.answer()
+
+
+@router.callback_query(AdminCB.filter(F.action == "grant"))
+async def admin_grant_role(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    """Give the visitor a real account. Only reachable by an admin."""
+    _guard(cq, user)
+    manager = PlanManager(session)
+    arg = callback_data.arg or "advisor"
+    advisor_id: int | None = None
+    if arg == "student":
+        role = Role.STUDENT
+        advisor_id = callback_data.page or None   # the int field carries the advisor
+    else:
+        role = Role.ADVISOR
+
+    try:
+        created = await manager.approve_request(
+            user, callback_data.ref, role, advisor_id=advisor_id
+        )
+        await session.commit()
+    except StudentError as exc:
+        await cq.answer(str(exc), show_alert=True)
+        return
+
+    role_fa = T.ROLE_FA[role.value]
+    await cq.answer(
+        T.ADMIN_REQUEST_APPROVED.format(name=created.full_name, role=role_fa),
+        show_alert=True,
+    )
+    # tell the person right away
+    try:
+        await cq.bot.send_message(
+            created.telegram_id,
+            T.ACCESS_APPROVED_ADVISOR if role is Role.ADVISOR else T.ACCESS_APPROVED_STUDENT,
+            parse_mode="HTML",
+        )
+    except Exception:  # pragma: no cover - they may have blocked the bot
+        log.warning("could not notify approved user tg=%s", created.telegram_id)
+    await admin_requests(cq, AdminCB(action="requests"), session, user)
+
+
+@router.callback_query(AdminCB.filter(F.action == "reject"))
+async def admin_reject_request(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    manager = PlanManager(session)
+    try:
+        request = await manager.reject_request(user, callback_data.ref)
+        await session.commit()
+    except StudentError as exc:
+        await cq.answer(str(exc), show_alert=True)
+        return
+    await cq.answer(T.ADMIN_REQUEST_REJECTED.format(name=request.full_name),
+                    show_alert=True)
+    await admin_requests(cq, AdminCB(action="requests"), session, user)
+
+
+# ── adding an advisor directly (no shell) ──
+@router.callback_query(AdminCB.filter(F.action == "add_advisor"))
+async def admin_add_advisor_prompt(
+    cq: CallbackQuery, state: FSMContext, user: User | None = None
+) -> None:
+    _guard(cq, user)
+    await state.set_state(AdminFlow.add_advisor)
+    await _edit(cq, T.ADMIN_ADD_ADVISOR_PROMPT, kb.admin_back("advisors"))
+    await cq.answer()
+
+
+@router.message(AdminFlow.add_advisor, F.text)
+async def admin_add_advisor_input(
+    message, state: FSMContext, session: AsyncSession, user: User | None = None
+) -> None:
+    if not is_admin(user, message.from_user.id):
+        raise PermissionError(T.ADMIN_ONLY)
+    raw = message.text.strip()
+    if raw.startswith("/"):
+        return
+    name, _, tg_raw = raw.partition("|")
+    digits = to_en_digits(tg_raw.strip())
+    if not digits.isdigit():
+        await message.answer(T.TG_ID_INVALID)
+        return
+    manager = PlanManager(session)
+    try:
+        advisor = await manager.create_advisor_by_telegram_id(user, name, int(digits))
+    except StudentError as exc:
+        await message.answer(f"⚠️ {exc}")
+        return
+    await state.clear()
+    await message.answer(
+        T.ADMIN_ADVISOR_ADDED.format(name=advisor.full_name),
+        reply_markup=kb.admin_advisor_card(advisor),
+        parse_mode="HTML",
+    )
+    try:
+        await message.bot.send_message(
+            advisor.telegram_id, T.ACCESS_APPROVED_ADVISOR, parse_mode="HTML"
+        )
+    except Exception:  # pragma: no cover
+        log.warning("could not notify new advisor tg=%s", advisor.telegram_id)
 
 
 # ───────────────────────────────── advisors ─────────────────────────────────
@@ -101,7 +277,7 @@ async def admin_advisors(
     total = await service.count_advisors()
     rows = await service.advisors(PAGE, callback_data.page * PAGE)
     if not rows:
-        await _edit(cq, T.ADMIN_NO_ADVISORS, kb.admin_back())
+        await _edit(cq, T.ADMIN_NO_ADVISORS, kb.admin_no_advisors())
         await cq.answer()
         return
     body = [T.ADMIN_ADVISORS.format(count=fa(total)), ""]

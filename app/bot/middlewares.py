@@ -84,8 +84,19 @@ class UserMiddleware(BaseMiddleware):
                 data["user"] = None
                 data["is_admin"] = is_admin_id
                 return await handler(event, data)
-            log.info("ignored update from unregistered tg=%s", tg_user.id)
-            await _reply(event, T.NOT_REGISTERED)
+
+            # No account is created here — the visit is queued as a request so
+            # an admin can grant a role deliberately from the panel.
+            from ..repositories.repositories import AccessRequestRepository
+
+            request = await AccessRequestRepository(session).record(
+                tg_user.id, full_name, tg_user.username
+            )
+            log.info(
+                "access request from tg=%s (%s) · visits=%s · status=%s",
+                tg_user.id, full_name, request.visits, request.status.value,
+            )
+            await _reply(event, _visitor_message(request))
             return None
 
         data["user"] = user
@@ -162,6 +173,17 @@ class ErrorMiddleware(BaseMiddleware):
             log.exception("unhandled error in handler; update=%r", event)
             await _reply(event, T.GENERIC_ERROR)
         return None
+
+
+def _visitor_message(request) -> str:
+    """What an unknown visitor sees — honest about where their request stands."""
+    from ..db.models import RequestStatus
+
+    if request.status is RequestStatus.REJECTED:
+        return T.ACCESS_REJECTED
+    if request.visits > 1:
+        return T.ACCESS_PENDING_AGAIN
+    return T.ACCESS_PENDING
 
 
 async def _reply(event: TelegramObject, text: str) -> None:

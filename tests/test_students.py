@@ -319,13 +319,20 @@ async def test_delete_student_from_bot(bot_and_dp, sessionmaker, advisors):
         assert await UserRepository(s).by_id(sid) is None  # really gone
 
 
-async def test_unknown_user_is_not_registered_silently(bot_and_dp, sessionmaker):
+async def test_unknown_user_gets_no_account_but_a_queued_request(
+    bot_and_dp, sessionmaker
+):
+    """No silent registration — the visit becomes a request an admin can grant."""
+    from app.repositories.repositories import AccessRequestRepository
+
     bot, api, dp = bot_and_dp
     api.clear()
     await dp.feed_update(bot, message_update("/start", 999888, 1))
-    assert any("لینک دعوت" in t for t in api.texts())
+    assert any("درخواست دسترسی شما" in t for t in api.texts())
     async with sessionmaker() as s:
-        assert await UserRepository(s).by_telegram_id(999888) is None  # no junk rows
+        assert await UserRepository(s).by_telegram_id(999888) is None   # no account
+        request = await AccessRequestRepository(s).by_telegram_id(999888)
+        assert request is not None and request.status.value == "pending"
 
 
 async def test_admin_from_env_is_registered(bot_and_dp, sessionmaker):

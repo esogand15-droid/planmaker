@@ -40,6 +40,15 @@ def _sample_student(**kw):
     )
 
 
+def _sample_request():
+    from app.db.models import AccessRequest, RequestStatus
+
+    return AccessRequest(
+        id=5, telegram_id=987654321, full_name="مهمان ناشناس",
+        username="guest", status=RequestStatus.PENDING, visits=2,
+    )
+
+
 def _sample_advisor(active: bool = True):
     from app.db.models import Role, User
 
@@ -155,6 +164,12 @@ def all_keyboards() -> dict:
         "range_summary": kb.range_summary(7),
         "confirm_new_invite": kb.confirm_new_invite(7),
         "student_card_with_link": kb.student_card(pending, invite_link="https://t.me/x"),
+        "admin_requests": kb.admin_requests([_sample_request()], 1, 40, 6),
+        "admin_request_card": kb.admin_request_card(5),
+        "admin_pick_advisor_for_request": kb.admin_pick_advisor_for_request(
+            [_sample_advisor()], 5
+        ),
+        "admin_no_advisors": kb.admin_no_advisors(),
     }
 
 

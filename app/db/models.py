@@ -221,6 +221,42 @@ class PlanFile(Base, TimestampMixin):
     plan: Mapped[WeeklyPlanDB] = relationship(back_populates="files")
 
 
+class RequestStatus(str, enum.Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class AccessRequest(Base, TimestampMixin):
+    """Someone opened the bot without an invite.
+
+    They are NOT given an account: their visit is recorded as a request so the
+    admin can grant a role deliberately from the panel. This keeps the "no
+    silent registration" rule intact while making unknown visitors reachable.
+    """
+
+    __tablename__ = "access_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    full_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    username: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[RequestStatus] = mapped_column(
+        Enum(RequestStatus, native_enum=False),
+        default=RequestStatus.PENDING,
+        nullable=False,
+        index=True,
+    )
+    visits: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    handled_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    granted_role: Mapped[Role | None] = mapped_column(Enum(Role, native_enum=False))
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 

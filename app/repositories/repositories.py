@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import lazyload, selectinload
 
 from ..db.models import (
+    AccessRequest,
     ActivityDB,
     AdvisorStudent,
     AssignmentDB,
@@ -16,6 +17,7 @@ from ..db.models import (
     PlanDayDB,
     PlanFile,
     PlanStatusDB,
+    RequestStatus,
     Role,
     User,
     WeeklyPlanDB,
@@ -241,6 +243,73 @@ class UserRepository:
             )
         )
         return res.scalar_one_or_none() is not None
+
+
+class AccessRequestRepository:
+    """Unknown visitors — recorded so an admin can grant them a role."""
+
+    def __init__(self, session: AsyncSession):
+        self.s = session
+
+    async def record(self, telegram_id: int, full_name: str, username: str | None):
+        """Upsert the visit; a rejected person is not silently re-queued."""
+        from ..domain.calendar import JalaliDate
+
+        existing = await self.by_telegram_id(telegram_id)
+        if existing is not None:
+            existing.visits += 1
+            existing.last_seen_at = JalaliDate.now()
+            existing.full_name = full_name or existing.full_name
+            existing.username = username
+            await self.s.flush()
+            return existing
+        request = AccessRequest(
+            telegram_id=telegram_id,
+            full_name=full_name or str(telegram_id),
+            username=username,
+            status=RequestStatus.PENDING,
+            visits=1,
+            last_seen_at=JalaliDate.now(),
+        )
+        self.s.add(request)
+        await self.s.flush()
+        return request
+
+    async def by_telegram_id(self, telegram_id: int) -> AccessRequest | None:
+        res = await self.s.execute(
+            select(AccessRequest).where(AccessRequest.telegram_id == telegram_id)
+        )
+        return res.scalar_one_or_none()
+
+    async def by_id(self, request_id: int) -> AccessRequest | None:
+        return await self.s.get(AccessRequest, request_id)
+
+    async def pending(self, limit: int = 6, offset: int = 0) -> list[AccessRequest]:
+        stmt = (
+            select(AccessRequest)
+            .where(AccessRequest.status == RequestStatus.PENDING)
+            .order_by(AccessRequest.last_seen_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list((await self.s.execute(stmt)).scalars())
+
+    async def count_pending(self) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(AccessRequest)
+            .where(AccessRequest.status == RequestStatus.PENDING)
+        )
+        return int((await self.s.execute(stmt)).scalar_one())
+
+    async def history(self, limit: int = 6, offset: int = 0) -> list[AccessRequest]:
+        stmt = (
+            select(AccessRequest)
+            .order_by(AccessRequest.updated_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list((await self.s.execute(stmt)).scalars())
 
 
 class PlanRepository:
