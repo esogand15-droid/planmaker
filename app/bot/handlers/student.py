@@ -30,7 +30,8 @@ async def my_last_plan(
     await manager.ensure_can_view_plan(user, plan)
     await ensure_artifacts(session, plan, queue)
 
-    png, pdf = input_for(plan, "png"), input_for(plan, "pdf")
+    root = queue.service.storage_root
+    png, pdf = input_for(plan, "png", root), input_for(plan, "pdf", root)
     if png is None:
         await cq.answer(T.GENERIC_ERROR, show_alert=True)
         return

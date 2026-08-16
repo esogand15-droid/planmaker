@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import BaseMiddleware
@@ -61,7 +60,8 @@ class UserMiddleware(BaseMiddleware):
         user = await repo.by_telegram_id(tg_user.id)
         full_name = tg_user.full_name or str(tg_user.id)
 
-        if user is None and tg_user.id in self.admin_ids:
+        is_admin_id = tg_user.id in self.admin_ids
+        if user is None and is_admin_id:
             user = await repo.create(
                 full_name=full_name,
                 role=Role.ADMIN,
@@ -71,21 +71,25 @@ class UserMiddleware(BaseMiddleware):
             log.info("registered admin from ADMIN_IDS tg=%s", tg_user.id)
         elif user is not None:
             await repo.touch_profile(user, tg_user.username, full_name)
-            if tg_user.id in self.admin_ids and user.role != Role.ADMIN:
+            # ADMIN_IDS may only ever *promote*; nothing here can demote a role
+            if is_admin_id and user.role != Role.ADMIN:
+                log.info("promoting tg=%s to admin (ADMIN_IDS)", tg_user.id)
                 user.role = Role.ADMIN
-            if not user.is_active:
-                user.is_active = True
+            if is_admin_id and not user.is_active:
+                user.is_active = True  # an admin can never be locked out
 
         if user is None:
             # unknown account: only an invite deep link may proceed
             if self._is_invite_start(event):
                 data["user"] = None
+                data["is_admin"] = is_admin_id
                 return await handler(event, data)
             log.info("ignored update from unregistered tg=%s", tg_user.id)
             await _reply(event, T.NOT_REGISTERED)
             return None
 
         data["user"] = user
+        data["is_admin"] = is_admin_id or user.role is Role.ADMIN
         return await handler(event, data)
 
 
@@ -93,13 +97,15 @@ class ThrottleMiddleware(BaseMiddleware):
     """Cheap per-user rate limit so one advisor cannot flood the render queue."""
 
     # Tuned for a fast advisor tapping through the wizard: ~4 actions/second
-    # sustained with a 20-action burst; only renders get a real cooldown.
-    def __init__(self, rate: float = 0.25, burst: int = 20, heavy_cooldown: float = 3.0):
+    # sustained with a 20-action burst. The cooldown is **per heavy action**, so
+    # pressing «پیش‌نمایش» and then «تولید» right away works; only hammering the
+    # *same* render button twice is suppressed.
+    def __init__(self, rate: float = 0.25, burst: int = 20, heavy_cooldown: float = 2.0):
         self.rate = rate
         self.burst = burst
         self.heavy_cooldown = heavy_cooldown
         self._tokens: dict[int, tuple[float, float]] = {}
-        self._heavy: dict[int, float] = {}
+        self._heavy: dict[tuple[int, str], float] = {}
 
     HEAVY_ACTIONS = ("p:generate", "p:regenerate", "p:preview")
 
@@ -113,13 +119,16 @@ class ThrottleMiddleware(BaseMiddleware):
         uid = tg_user.id
 
         payload = getattr(event, "data", None) or ""
-        if any(payload.startswith(a) for a in self.HEAVY_ACTIONS):
-            last = self._heavy.get(uid, 0.0)
+        heavy = next((a for a in self.HEAVY_ACTIONS if payload.startswith(a)), None)
+        if heavy is not None:
+            key = (uid, heavy)
+            last = self._heavy.get(key, 0.0)
             if now - last < self.heavy_cooldown:
+                log.info("suppressed duplicate %s from tg=%s", heavy, uid)
                 if isinstance(event, CallbackQuery):
-                    await event.answer("لطفاً چند لحظه صبر کنید…", show_alert=False)
+                    await event.answer("در حال انجام است، چند لحظه صبر کنید…")
                 return None
-            self._heavy[uid] = now
+            self._heavy[key] = now
 
         tokens, last_seen = self._tokens.get(uid, (float(self.burst), now))
         tokens = min(self.burst, tokens + (now - last_seen) / self.rate)
@@ -143,6 +152,9 @@ class ErrorMiddleware(BaseMiddleware):
         try:
             return await handler(event, data)
         except AccessDenied as exc:
+            await _reply(event, str(exc) or T.ACCESS_DENIED)
+        except PermissionError as exc:
+            log.warning("permission denied: %s", exc)
             await _reply(event, str(exc) or T.ACCESS_DENIED)
         except PlanGenerationError as exc:
             await _reply(event, f"⚠️ {exc}")

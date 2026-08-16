@@ -64,15 +64,6 @@ def queue(tmp_path) -> RenderQueue:
 
 @pytest.fixture()
 def bot_and_dp(queue, sessionmaker):
-    # aiogram routers are module-level singletons; detach them so each test can
-    # build a fresh dispatcher (production creates exactly one).
-    from app.bot.handlers import advisor as advisor_mod
-    from app.bot.handlers import common as common_mod
-    from app.bot.handlers import fallback as fallback_mod
-    from app.bot.handlers import student as student_mod
-
-    for module in (common_mod, student_mod, advisor_mod, fallback_mod):
-        module.router._parent_router = None
 
     bot, session = make_bot()
     dp = build_dispatcher(queue, sessionmaker)

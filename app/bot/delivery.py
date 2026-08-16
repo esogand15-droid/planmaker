@@ -29,14 +29,16 @@ def cached_file_id(plan: WeeklyPlanDB, kind: Kind) -> str | None:
     return plan.image_file_id if kind == "png" else plan.pdf_file_id
 
 
-def local_path(plan: WeeklyPlanDB, kind: Kind) -> Path | None:
-    """Resolve a stored artefact path, refusing anything outside STORAGE_ROOT."""
+def local_path(
+    plan: WeeklyPlanDB, kind: Kind, storage_root: Path | str | None = None
+) -> Path | None:
+    """Resolve a stored artefact path, refusing anything outside the storage root."""
     raw = plan.image_path if kind == "png" else plan.pdf_path
     if not raw:
         return None
     try:
         path = Path(raw).resolve()
-        root = Path(settings.storage_root).resolve()
+        root = Path(storage_root or settings.storage_root).resolve()
     except OSError:  # pragma: no cover - unreadable path
         return None
     if not path.is_relative_to(root):
@@ -65,8 +67,9 @@ async def ensure_artifacts(
     session: AsyncSession, plan: WeeklyPlanDB, queue: RenderQueue
 ) -> bool:
     """Guarantee that both artefacts are sendable; re-render if they vanished."""
-    have_png = bool(cached_file_id(plan, "png")) or local_path(plan, "png") is not None
-    have_pdf = bool(cached_file_id(plan, "pdf")) or local_path(plan, "pdf") is not None
+    root = queue.service.storage_root
+    have_png = bool(cached_file_id(plan, "png")) or local_path(plan, "png", root) is not None
+    have_pdf = bool(cached_file_id(plan, "pdf")) or local_path(plan, "pdf", root) is not None
     if have_png and have_pdf:
         return True
 
@@ -97,10 +100,20 @@ class PlanRepositoryUpdate:
         )
 
 
-def input_for(plan: WeeklyPlanDB, kind: Kind) -> str | FSInputFile | None:
+def input_for(
+    plan: WeeklyPlanDB, kind: Kind, storage_root: Path | str | None = None
+) -> str | FSInputFile | None:
     """Prefer the cached file_id; fall back to the file on disk."""
     file_id = cached_file_id(plan, kind)
     if file_id:
         return file_id
-    path = local_path(plan, kind)
+    path = local_path(plan, kind, storage_root)
     return FSInputFile(path) if path else None
+
+
+def is_inside_storage(path: Path | str, storage_root: Path | str) -> bool:
+    """Guard for any file we are about to serve from disk."""
+    try:
+        return Path(path).resolve().is_relative_to(Path(storage_root).resolve())
+    except OSError:  # pragma: no cover - unreadable path
+        return False

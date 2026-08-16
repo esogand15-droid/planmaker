@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db.models import PlanStatusDB, Role, User, WeeklyPlanDB
 from ..domain.models import Activity, Assignment, PlanDay, WeeklyPlan
 from ..repositories.repositories import AuditRepository, PlanRepository, UserRepository
+from .invites import InviteOutcome, InviteResult, blocks_invite
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +54,15 @@ class PlanManager:
             return
         raise AccessDenied("این برنامه در دسترس شما نیست.")
 
+    def ensure_active(self, actor: User) -> None:
+        """A suspended account keeps its data but loses every write action."""
+        from ..security import is_admin
+
+        if not actor.is_active and not is_admin(actor, actor.telegram_id):
+            raise AccessDenied(
+                "🔒 حساب شما موقتاً غیرفعال شده است. با مدیر سیستم تماس بگیرید."
+            )
+
     async def ensure_owns_student(self, advisor: User, student_id: int) -> User:
         student = await self.users.by_id(student_id)
         if student is None:
@@ -65,11 +75,16 @@ class PlanManager:
 
     # ------------------------------------------------- student management --
     async def create_student(
-        self, advisor: User, full_name: str, grade: str | None = None
+        self,
+        advisor: User,
+        full_name: str,
+        grade: str | None = None,
+        telegram_id: int | None = None,
     ) -> User:
         """An advisor registers their own student. Returns the new row."""
         if advisor.role not in (Role.ADVISOR, Role.ADMIN):
             raise AccessDenied("فقط مشاور می‌تواند دانش‌آموز اضافه کند.")
+        self.ensure_active(advisor)
         name = " ".join((full_name or "").split())
         if len(name) < 2:
             raise StudentError("نام دانش‌آموز خیلی کوتاه است.")
@@ -80,34 +95,156 @@ class PlanManager:
         if any(s.full_name == name for s in existing):
             raise StudentError("دانش‌آموزی با همین نام در فهرست شما وجود دارد.")
 
+        if telegram_id is not None:
+            taken = await self.users.by_telegram_id(telegram_id)
+            if taken is not None:
+                raise StudentError("این آیدی تلگرام قبلاً در سیستم ثبت شده است.")
+
         student = await self.users.create_student_for_advisor(
-            advisor.id, name, grade=(grade or None)
+            advisor.id, name, grade=(grade or None), telegram_id=telegram_id
         )
         await self.audit.log(
             "student.created", actor_id=advisor.id, student_id=student.id, detail=name
         )
+        log.info("student created advisor=%s student=%s", advisor.id, student.id)
         return student
 
     async def get_student(self, advisor: User, student_id: int) -> User:
         return await self.ensure_owns_student(advisor, student_id)
 
-    async def new_invite(self, advisor: User, student_id: int) -> str:
+    async def new_invite(self, advisor: User, student_id: int) -> tuple[str, datetime]:
+        """Issue a fresh single-use, expiring invite token. Returns (token, expiry)."""
         student = await self.ensure_owns_student(advisor, student_id)
         if student.is_connected:
             raise StudentError("این دانش‌آموز از قبل به ربات متصل است.")
-        token = student.invite_token or await self.users.rotate_invite_token(student)
+        token = await self.users.rotate_invite_token(student)
         await self.audit.log(
-            "student.invited", actor_id=advisor.id, student_id=student.id
+            "student.invite_issued", actor_id=advisor.id, student_id=student.id,
+            detail=f"expires={student.invite_expires_at:%Y-%m-%d}",
         )
-        return token
+        log.info("invite issued advisor=%s student=%s", advisor.id, student.id)
+        return token, student.invite_expires_at
 
-    async def claim_invite(self, token: str, telegram_id: int, username: str | None):
+    async def revoke_invite(self, advisor: User, student_id: int) -> None:
+        student = await self.ensure_owns_student(advisor, student_id)
+        await self.users.revoke_invite(student)
+        await self.audit.log(
+            "student.invite_revoked", actor_id=advisor.id, student_id=student.id
+        )
+
+    async def claim_invite(
+        self,
+        token: str,
+        telegram_id: int,
+        username: str | None,
+        actor: User | None = None,
+        *,
+        is_admin_env: bool = False,
+    ) -> InviteResult:
+        """Redeem an invite link. Role integrity is checked BEFORE any write.
+
+        `actor` is the account already bound to `telegram_id` (None for a
+        newcomer); `is_admin_env` is True when the Telegram id is listed in
+        ADMIN_IDS, which outranks whatever the database says.
+        """
+        from ..domain.persian import now_local
+
+        await self.audit.log(
+            "invite.opened", actor_id=actor.id if actor else None, detail=str(telegram_id)
+        )
+
+        # ── 1. role protection comes first: never touch an admin/advisor ──
+        if blocks_invite(actor, is_admin_env):
+            role = "admin" if is_admin_env or (actor and actor.role == Role.ADMIN) else "advisor"
+            log.warning(
+                "invite blocked: %s account tg=%s tried a student link", role, telegram_id
+            )
+            await self._log_invite(InviteOutcome.ROLE_CONFLICT, actor, None, telegram_id)
+            return InviteResult(InviteOutcome.ROLE_CONFLICT)
+
+        # ── 2. token validity ──
         student = await self.users.by_invite_token(token)
         if student is None:
-            return None
+            await self._log_invite(InviteOutcome.INVALID, actor, None, telegram_id)
+            return InviteResult(InviteOutcome.INVALID)
+
+        expiry = student.invite_expires_at
+        if expiry is not None:
+            if expiry.tzinfo is None:  # SQLite hands back naive datetimes
+                expiry = expiry.replace(tzinfo=now_local().tzinfo)
+            if expiry < now_local():
+                await self._log_invite(InviteOutcome.EXPIRED, actor, student, telegram_id)
+                return InviteResult(InviteOutcome.EXPIRED, student)
+
+        # ── 3. ownership rules ──
+        if student.telegram_id is not None:
+            if student.telegram_id == telegram_id:
+                await self.users.revoke_invite(student)  # consume the link
+                await self._log_invite(InviteOutcome.ALREADY_SELF, actor, student, telegram_id)
+                return InviteResult(InviteOutcome.ALREADY_SELF, student)
+            await self._log_invite(InviteOutcome.ALREADY_LINKED, actor, student, telegram_id)
+            return InviteResult(InviteOutcome.ALREADY_LINKED, student)
+
+        if actor is not None and actor.id != student.id:
+            # an existing (student) account may not absorb another student
+            await self._log_invite(InviteOutcome.CROSS_STUDENT, actor, student, telegram_id)
+            return InviteResult(InviteOutcome.CROSS_STUDENT, student)
+
+        # ── 4. safe to link ──
         await self.users.claim_invite(student, telegram_id, username)
+        await self._log_invite(InviteOutcome.LINKED, actor, student, telegram_id)
+        log.info("invite accepted student=%s tg=%s", student.id, telegram_id)
+        return InviteResult(InviteOutcome.LINKED, student)
+
+    async def _log_invite(
+        self,
+        outcome: InviteOutcome,
+        actor: User | None,
+        student: User | None,
+        telegram_id: int,
+    ) -> None:
         await self.audit.log(
-            "student.connected", actor_id=student.id, student_id=student.id
+            outcome.audit_action,
+            actor_id=actor.id if actor else None,
+            student_id=student.id if student else None,
+            detail=f"tg={telegram_id} outcome={outcome.value}",
+        )
+
+    async def link_telegram_id(self, advisor: User, student_id: int, telegram_id: int) -> User:
+        """Advisor already knows the numeric id — link directly, no invite needed."""
+        student = await self.ensure_owns_student(advisor, student_id)
+        if student.telegram_id == telegram_id:
+            return student
+        try:
+            await self.users.attach_telegram_id(student, telegram_id)
+        except ValueError:
+            raise StudentError(
+                "این آیدی تلگرام قبلاً به حساب دیگری وصل شده است."
+            ) from None
+        await self.audit.log(
+            "student.linked_manually", actor_id=advisor.id, student_id=student.id,
+            detail=str(telegram_id),
+        )
+        return student
+
+    async def edit_student(
+        self, advisor: User, student_id: int, full_name: str, grade: str | None
+    ) -> User:
+        student = await self.ensure_owns_student(advisor, student_id)
+        name = " ".join((full_name or "").split())
+        if len(name) < 2:
+            raise StudentError("نام دانش‌آموز خیلی کوتاه است.")
+        if len(name) > 80:
+            raise StudentError("نام دانش‌آموز خیلی طولانی است (حداکثر ۸۰ نویسه).")
+        clash = [
+            u for u in await self.users.students_of(advisor.id, query=name)
+            if u.full_name == name and u.id != student.id
+        ]
+        if clash:
+            raise StudentError("دانش‌آموز دیگری با همین نام در فهرست شما هست.")
+        await self.users.update_student(student, full_name=name, grade=grade)
+        await self.audit.log(
+            "student.edited", actor_id=advisor.id, student_id=student.id, detail=name
         )
         return student
 
@@ -161,6 +298,7 @@ class PlanManager:
     ) -> WeeklyPlanDB:
         from datetime import timedelta
 
+        self.ensure_active(advisor)
         student = await self.ensure_owns_student(advisor, student_id)
         existing = await self.plans.find_by_week(student.id, week_start)
         if existing is not None:
@@ -177,6 +315,7 @@ class PlanManager:
         return plan
 
     async def get_editable(self, actor: User, plan_id: int) -> WeeklyPlanDB:
+        self.ensure_active(actor)
         plan = await self.plans.get(plan_id)
         if plan is None:
             raise AccessDenied("برنامه پیدا نشد.")

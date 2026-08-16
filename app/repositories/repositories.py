@@ -52,6 +52,12 @@ class UserRepository:
         await self.s.flush()
         return user
 
+    INVITE_TTL_DAYS = 14
+
+    def _new_token(self) -> str:
+        """32 chars of URL-safe entropy (~190 bits): not brute-forceable."""
+        return secrets.token_urlsafe(24)[:32]
+
     async def create_student_for_advisor(
         self,
         advisor_id: int,
@@ -66,39 +72,83 @@ class UserRepository:
         case) an invite token is generated instead; the student claims the
         account by opening the deep link.
         """
+        from ..domain.persian import now_local
+
         student = User(
             full_name=full_name.strip(),
             role=Role.STUDENT,
             grade=(grade or None),
             telegram_id=telegram_id,
             created_by_id=advisor_id,
-            invite_token=None if telegram_id else secrets.token_urlsafe(12)[:22],
         )
         self.s.add(student)
         await self.s.flush()
+        if telegram_id is None:
+            await self.rotate_invite_token(student)
         await self.link_student(advisor_id, student.id)
         return student
 
-    async def rotate_invite_token(self, student: User) -> str:
-        student.invite_token = secrets.token_urlsafe(12)[:22]
+    async def rotate_invite_token(self, student: User, ttl_days: int | None = None) -> str:
+        """Issue a fresh single-use token; any previous one stops working."""
+        from ..domain.persian import now_local
+
+        ttl = ttl_days or self.INVITE_TTL_DAYS
+        student.invite_token = self._new_token()
+        student.invite_issued_at = now_local()
+        student.invite_expires_at = now_local() + timedelta(days=ttl)
         await self.s.flush()
         return student.invite_token
 
+    async def revoke_invite(self, student: User) -> None:
+        student.invite_token = None
+        student.invite_expires_at = None
+        await self.s.flush()
+
     async def by_invite_token(self, token: str) -> User | None:
+        if not token or len(token) < 16:  # ignore obviously forged tokens
+            return None
         res = await self.s.execute(select(User).where(User.invite_token == token))
         return res.scalar_one_or_none()
 
-    async def claim_invite(self, student: User, telegram_id: int, username: str | None) -> User:
-        """Bind a Telegram account to an advisor-created student row."""
+    async def attach_telegram_id(self, student: User, telegram_id: int) -> User:
+        """Manual linking by the advisor (they already know the numeric id)."""
         duplicate = await self.by_telegram_id(telegram_id)
         if duplicate is not None and duplicate.id != student.id:
-            # a stray auto-created row for the same person: fold it away
+            raise ValueError("telegram id already belongs to another account")
+        student.telegram_id = telegram_id
+        student.invite_token = None
+        student.invite_expires_at = None
+        await self.s.flush()
+        return student
+
+    async def update_student(
+        self, student: User, *, full_name: str | None = None, grade: str | None = None
+    ) -> User:
+        if full_name:
+            student.full_name = full_name
+        student.grade = grade or None
+        await self.s.flush()
+        return student
+
+    async def claim_invite(self, student: User, telegram_id: int, username: str | None) -> User:
+        """Bind a Telegram account to an advisor-created student row."""
+        from ..domain.persian import now_local  # noqa: F401  (kept for symmetry)
+
+        duplicate = await self.by_telegram_id(telegram_id)
+        if duplicate is not None and duplicate.id != student.id:
+            # Only a plain, unused *student* row may be folded away. Advisors and
+            # admins are never touched — the caller must reject those upstream.
+            if duplicate.role is not Role.STUDENT:
+                raise PermissionError(
+                    f"refusing to fold {duplicate.role.value} account #{duplicate.id}"
+                )
             duplicate.telegram_id = None
             duplicate.is_active = False
             await self.s.flush()
         student.telegram_id = telegram_id
         student.username = username
         student.invite_token = None
+        student.invite_expires_at = None
         await self.s.flush()
         return student
 

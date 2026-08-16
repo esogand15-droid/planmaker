@@ -18,7 +18,7 @@ from ..logging_config import setup_logging
 from ..rendering.factory import get_renderer
 from ..services.plan_service import WeeklyPlanService
 from ..services.render_queue import RenderQueue
-from .handlers import advisor, common, fallback, student
+from .handlers import admin, advisor, common, fallback, student
 from .health import HealthServer
 from .middlewares import (
     DatabaseMiddleware,
@@ -58,6 +58,7 @@ def build_dispatcher(queue: RenderQueue, sessionmaker, admin_ids=(), storage=Non
         observer.middleware(UserMiddleware(tuple(admin_ids)))
 
     dp.include_router(common.router)
+    dp.include_router(admin.router)
     dp.include_router(student.router)
     dp.include_router(advisor.router)
     dp.include_router(fallback.router)  # must stay last: catches orphan callbacks

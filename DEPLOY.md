@@ -1,80 +1,81 @@
-# DEPLOY — رتبه لند (GitHub → Railway → Telegram)
+# DEPLOY — رتبه لند (نسخه ۱.۰.۰-final)
 
-راهنمای کوتاه و عملی. زمان لازم: حدود ۱۰ دقیقه. نیازی به دستکاری کد نیست.
+از ZIP تا ربات آنلاین در ۱۶ گام. نیازی به دستکاری کد نیست.
 
 ---
 
-## Step 1 — GitHub
+### ۱. Extract ZIP
 
 ```bash
-unzip rotbeland-bot-production-v1.0.0.zip -d rotbeland
-cd rotbeland
+unzip rotbeland-bot-final-v1.0.0.zip -d rotbeland && cd rotbeland
+```
 
+### ۲. ساخت ریپازیتوری GitHub
+
+یک ریپوی **Private** بسازید.
+
+### ۳. Push کد
+
+```bash
 git init
 git add .
-git commit -m "Initial production release"
+git commit -m "Rotbe Land weekly planner v1.0.0-final"
 git branch -M main
-git remote add origin <GITHUB_REPO_URL>      # ریپازیتوری را Private بسازید
+git remote add origin <GITHUB_REPO_URL>
 git push -u origin main
 ```
 
-> فایل `.env` در ریپو وجود ندارد و `.gitignore` جلوی اضافه‌شدنش را می‌گیرد.
-> فقط `.env.example` (بدون مقدار واقعی) منتشر می‌شود.
+### ۴. ساخت پروژه در Railway
 
----
+[railway.app](https://railway.app) → **New Project**.
 
-## Step 2 — Telegram Token
+### ۵. افزودن PostgreSQL
 
-1. در تلگرام به **@BotFather** بروید → `/newbot` → نام و username.
-2. توکن را کپی کنید. **هیچ‌جای کد قرار نمی‌گیرد** — فقط در Railway → Variables.
-3. توصیه: `/setprivacy` → Enable و `/setcommands`:
+**Add → Database → PostgreSQL** (در همان پروژه).
 
-```
-start - منوی اصلی
-quick - راهنمای ورود سریع فعالیت
-cancel - لغو مرحله جاری
-help - راهنما
-```
+### ۶. اتصال GitHub
 
----
+**Add → GitHub Repo** → ریپوی خود را انتخاب کنید.
+تنظیمات Build خودکار از `railway.toml` خوانده می‌شود (Dockerfile).
 
-## Step 3 — Railway Project + PostgreSQL
+### ۷. تنظیم `BOT_TOKEN`
 
-1. [railway.app](https://railway.app) → **New Project** → **Deploy from GitHub repo** → ریپوی خود را انتخاب کنید.
-   (Builder خودکار از `railway.toml` خوانده می‌شود: Dockerfile.)
-2. داخل همان پروژه: **Add → Database → PostgreSQL**.
-
-ساختار پروژه در Railway:
+از **@BotFather** توکن بگیرید → سرویس bot → **Variables**:
 
 ```
-Railway Project
- ├── bot  (سرویس GitHub شما)
- └── Postgres
+BOT_TOKEN = <توکن شما>
 ```
 
----
+### ۸. تنظیم `DATABASE_URL`
 
-## Step 4 — Environment Variables
+```
+DATABASE_URL = ${{Postgres.DATABASE_URL}}
+```
 
-در سرویس **bot** → تب **Variables**:
+(Reference بزنید، دستی کپی نکنید. تبدیل به درایور async خودکار انجام می‌شود.)
 
-| Variable | مقدار |
-|---|---|
-| `BOT_TOKEN` | توکن @BotFather |
-| `TIMEZONE` | `Asia/Tehran` (مهم: سرور روی UTC است) |
-| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` ← Reference، دستی کپی نکنید |
-| `ENVIRONMENT` | `production` |
-| `ADMIN_IDS` | تلگرام آی‌دی عددی شما (مثلاً `123456789`) |
-| `STORAGE_ROOT` | `/data/generated` |
-| `RENDER_BACKEND` | `auto` |
-| `REDIS_URL` | *(اختیاری)* `${{Redis.REDIS_URL}}` اگر سرویس Redis اضافه کردید |
+### ۹. تنظیم `ADMIN_IDS`
 
-> `postgres://` خودکار به `postgresql+asyncpg://` تبدیل می‌شود؛ نیازی به ویرایش نیست.
-> Telegram ID خود را از @userinfobot بگیرید.
+آیدی عددی تلگرام خودتان (از @userinfobot یا بعداً با `/id` در همین ربات):
 
----
+```
+ADMIN_IDS = 123456789
+```
 
-## Step 5 — Volume
+این متغیر **کلید پنل مدیریت** است: هر آیدی داخل آن، بعد از `/start` دکمه
+«🛠 پنل مدیریت» را می‌بیند (مشاوران و دانش‌آموزان نمی‌بینند). چند مدیر را با
+کاما جدا کنید: `ADMIN_IDS=111,222`.
+
+بقیه متغیرهای پیشنهادی:
+
+```
+ENVIRONMENT   = production
+STORAGE_ROOT  = /data/generated
+RENDER_BACKEND= auto
+TIMEZONE      = Asia/Tehran
+```
+
+### ۱۰. افزودن Volume
 
 سرویس bot → **Settings → Volumes → Add Volume** → Mount path:
 
@@ -82,89 +83,70 @@ Railway Project
 /data/generated
 ```
 
-بدون Volume هم ربات کار می‌کند (فایل‌ها از روی دیتابیس دوباره ساخته می‌شوند)، اما با
-Volume، PNG/PDFها بین Deployها باقی می‌مانند.
+### ۱۱. Deploy
 
----
-
-## Step 6 — Deploy
-
-**Deploy** را بزنید. ترتیب خودکار:
+دکمه Deploy. ترتیب خودکار:
 
 ```
 Build (deps + Chromium + verify libraqm/assets)
    ↓
-preDeployCommand: alembic upgrade head
+preDeploy: alembic upgrade head
    ↓
-./docker-entrypoint.sh bot  →  Long Polling
+./docker-entrypoint.sh bot   →   Long Polling
 ```
 
-⚠️ **Replicas را روی ۱ نگه دارید** (در `railway.toml` ست شده). دو Instance هم‌زمان
-باعث خطای `TelegramConflictError` می‌شود، چون Long Polling فقط یک مصرف‌کننده می‌پذیرد.
+⚠️ **Replicas را روی ۱ نگه دارید** (در `railway.toml` ست شده) وگرنه تلگرام
+خطای `Conflict` می‌دهد.
 
----
+### ۱۲. اجرای Smoke Test
 
-## Step 7 — بررسی Logs
-
-در Deploy Logs باید ببینید:
-
-```
-✔ config: {...}          ← بدون نمایش Secret
-✔ pillow/libraqm: True
-✔ chromium: True
-database connection established
-authorized as @<your_bot>
-```
-
----
-
-## Step 8 — ساخت اولین مشاور
-
-سرویس bot → **Shell** (یا `railway run` از روی سیستم خودتان):
-
-```bash
-python -m tools.manage add-advisor "نام مشاور" --telegram-id <TELEGRAM_ID>
-python -m tools.manage list-users
-```
-
-شناسه تلگرام خود را با فرستادن `/id` به ربات ببینید.
-
-**دانش‌آموزان دیگر نیازی به خط فرمان ندارند:** مشاور در ربات می‌زند
-«👨‍🎓 دانش‌آموزان → ➕ افزودن دانش‌آموز»، نام را می‌فرستد و یک لینک دعوت
-می‌گیرد که برای دانش‌آموز ارسال می‌کند.
-
-هر آی‌دی داخل `ADMIN_IDS` در اولین `/start` خودکار نقش **admin** می‌گیرد و به همه
-دانش‌آموزان دسترسی دارد؛ برای مشاوران عادی از دستور بالا استفاده کنید.
-
----
-
-## Step 9 — تست در تلگرام
-
-```
-/start
- → ➕ برنامه جدید
- → انتخاب دانش‌آموز
- → انتخاب هفته
- → یک روز → یک فعالیت:  زیست | گوارش | ۴۰ تست | ۹۰ دقیقه
- → 📝 تکالیف
- → 👀 پیش‌نمایش
- → ✅ تولید برنامه   →  دریافت PNG + PDF
- → 📤 ارسال برای دانش‌آموز
-```
-
-سمت دانش‌آموز: `/start` → 📅 برنامه این هفته.
-
----
-
-## Step 10 — Smoke Test
-
-در Shell سرویس:
+سرویس bot → **Shell**:
 
 ```bash
 python -m tools.smoke_test --full
 ```
 
-خروجی باید همه‌جا `✔` باشد و کد خروج `0`.
+باید همه‌جا `✔` باشد.
+
+### ۱۳. باز کردن تلگرام
+
+به ربات خود بروید.
+
+### ۱۴. `/start`
+
+منوی مشاور باید ظاهر شود (چون آی‌دی شما در `ADMIN_IDS` است).
+
+### ۱۵. ساخت مشاور و دانش‌آموز
+
+**مشاور** (فقط یک‌بار، از Shell):
+
+```bash
+python -m tools.manage add-advisor "نام مشاور" --telegram-id <TELEGRAM_ID>
+```
+
+**دانش‌آموز** — کاملاً داخل ربات، بدون Shell:
+
+```
+👨‍🎓 دانش‌آموزان → ➕ افزودن دانش‌آموز
+   → «علی رضایی»  یا  «علی رضایی | دوازدهم تجربی»
+   → 🔗 اتصال به تلگرام → ساخت لینک دعوت
+   → لینک را برای دانش‌آموز بفرستید
+```
+
+### ۱۶. پنل مدیریت و اولین برنامه
+
+با `/start` → «🛠 پنل مدیریت» به این بخش‌ها دسترسی دارید:
+مشاوران · دانش‌آموزان · وضعیت سیستم · وضعیت ربات · دیتابیس · فایل‌ها ·
+آمار · Audit Logs · تنظیمات.
+
+سپس اولین برنامه:
+
+```
+👨‍🎓 دانش‌آموزان → انتخاب دانش‌آموز → 📅 برنامه این هفته
+   → روز → خانه → «زیست | گوارش | ۴۰ تست | ۹۰ دقیقه»
+   → 📝 تکالیف → 👀 پیش‌نمایش → ✅ تولید برنامه
+   → 📤 ارسال برای دانش‌آموز
+```
 
 ---
 
@@ -172,11 +154,12 @@ python -m tools.smoke_test --full
 
 | نشانه | راه‌حل |
 |---|---|
-| `BOT_TOKEN is not set` | Variable در Railway ست نشده |
+| `BOT_TOKEN is not set` | متغیر در Railway ست نشده |
 | `TelegramConflictError` | بیش از یک Instance؛ Replicas = 1 و ربات محلی را ببندید |
-| `No module named 'psycopg2'` | فقط در نسخه‌های قبل از v1.0.1 رخ می‌داد؛ این بسته v1.0.1 است و `DATABASE_URL` را خودکار به درایور async تبدیل می‌کند |
+| `No module named 'psycopg2'` | نسخه‌های قبل از ۱.۰.۱؛ این بسته مشکل ندارد |
 | `database unreachable` | `DATABASE_URL` باید Reference به سرویس Postgres باشد |
-| `chromium: False` | PDF رستر تولید می‌شود (ربات سالم است)؛ برای PDF برداری Build را دوباره اجرا کنید |
-| دانش‌آموز پیام نمی‌گیرد | باید یک‌بار خودش `/start` کرده باشد |
+| `chromium: False` | PDF رستر تولید می‌شود (ربات سالم است) |
+| دانش‌آموز پیام نمی‌گیرد | باید لینک دعوت را باز کرده باشد (کارت او: 🟢/🟡) |
+| تاریخ‌ها یک روز جلو/عقب | `TIMEZONE=Asia/Tehran` را ست کنید |
 
-جزئیات بیشتر: بخش Troubleshooting در `README.md`.
+جزئیات بیشتر: `README.md` (بخش Troubleshooting) و `REVIEW.md`.

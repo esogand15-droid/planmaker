@@ -6,7 +6,6 @@ only dynamic text is composited on top.
 from __future__ import annotations
 
 import io
-from pathlib import Path
 
 from PIL import Image, ImageDraw
 
@@ -15,7 +14,7 @@ from ..domain.persian import apply_digit_style, jalali_short, normalize_fa, shap
 from .assignments import assignment_lines
 from .base import BaseRenderer, OverflowIssue, RenderResult
 from .fit import fit_text, load_font, raqm_available, text_width
-from .layout import Box, TemplateLayout
+from .layout import TemplateLayout
 
 
 class PillowRenderer(BaseRenderer):

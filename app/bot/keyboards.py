@@ -10,7 +10,18 @@ from ..db.models import User, WeeklyPlanDB
 from ..domain.models import SLOTS_PER_DAY, WEEKDAY_KEYS, WeeklyPlan
 from ..domain.persian import jalali_day_month, jalali_short, to_fa_digits, week_label
 from . import texts as T
-from .texts import AssignCB, DayCB, FileCB, ListCB, Nav, PlanCB, SlotCB, StudentCB, WeekCB
+from .texts import (
+    AdminCB,
+    AssignCB,
+    DayCB,
+    FileCB,
+    ListCB,
+    Nav,
+    PlanCB,
+    SlotCB,
+    StudentCB,
+    WeekCB,
+)
 
 
 def advisor_menu() -> InlineKeyboardMarkup:
@@ -94,32 +105,97 @@ def no_students(mode: str = "card") -> InlineKeyboardMarkup:
 
 
 def student_card(student: User) -> InlineKeyboardMarkup:
+    sid = student.id
     kb = InlineKeyboardBuilder()
-    kb.button(
-        text="➕ برنامه جدید برای او",
-        callback_data=StudentCB(action="pick", student_id=student.id, mode="card"),
-    )
-    kb.adjust(1)
-    if not student.telegram_id:
-        kb.row(
-            InlineKeyboardButton(
-                text="🔗 لینک دعوت",
-                callback_data=StudentCB(action="invite", student_id=student.id).pack(),
-            )
-        )
     kb.row(
         InlineKeyboardButton(
-            text="📂 برنامه‌های او",
-            callback_data=ListCB(kind="student", ref=student.id).pack(),
+            text="📅 برنامه این هفته",
+            callback_data=StudentCB(action="thisweek", student_id=sid).pack(),
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="➕ برنامه جدید",
+            callback_data=StudentCB(action="pick", student_id=sid, mode="card").pack(),
         ),
         InlineKeyboardButton(
-            text="🗑 حذف",
-            callback_data=StudentCB(action="ask_del", student_id=student.id).pack(),
+            text="📂 برنامه‌های قبلی",
+            callback_data=ListCB(kind="student", ref=sid).pack(),
         ),
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="✏️ ویرایش اطلاعات",
+            callback_data=StudentCB(action="edit", student_id=sid).pack(),
+        ),
+        InlineKeyboardButton(
+            text="🔗 اتصال به تلگرام" if not student.telegram_id else "🔗 وضعیت اتصال",
+            callback_data=StudentCB(action="connect", student_id=sid).pack(),
+        ),
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="🗑 حذف دانش‌آموز",
+            callback_data=StudentCB(action="ask_del", student_id=sid).pack(),
+        )
     )
     kb.row(
         InlineKeyboardButton(
             text="⬅️ فهرست دانش‌آموزان", callback_data=Nav(to="students").pack()
+        )
+    )
+    return kb.as_markup()
+
+
+def connect_menu(student: User) -> InlineKeyboardMarkup:
+    sid = student.id
+    kb = InlineKeyboardBuilder()
+    if not student.telegram_id:
+        kb.row(
+            InlineKeyboardButton(
+                text="🔗 ساخت لینک دعوت",
+                callback_data=StudentCB(action="invite", student_id=sid).pack(),
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text="🔢 ثبت آیدی عددی",
+                callback_data=StudentCB(action="setid", student_id=sid).pack(),
+            )
+        )
+        if student.invite_token:
+            kb.row(
+                InlineKeyboardButton(
+                    text="🚫 ابطال لینک فعلی",
+                    callback_data=StudentCB(action="revoke", student_id=sid).pack(),
+                )
+            )
+    kb.row(
+        InlineKeyboardButton(
+            text="⬅️ بازگشت",
+            callback_data=StudentCB(action="card", student_id=sid, mode="card").pack(),
+        )
+    )
+    return kb.as_markup()
+
+
+def invite_ready(student: User) -> InlineKeyboardMarkup:
+    sid = student.id
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(
+            text="🔄 لینک تازه",
+            callback_data=StudentCB(action="invite", student_id=sid).pack(),
+        ),
+        InlineKeyboardButton(
+            text="🚫 ابطال لینک",
+            callback_data=StudentCB(action="revoke", student_id=sid).pack(),
+        ),
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="⬅️ بازگشت",
+            callback_data=StudentCB(action="card", student_id=sid, mode="card").pack(),
         )
     )
     return kb.as_markup()
@@ -460,3 +536,150 @@ def plan_header(plan: WeeklyPlanDB) -> str:
         f"📅 {week_label(plan.week_start, plan.week_end)}\n"
         f"🗓 {jalali_short(plan.week_start)} تا {jalali_short(plan.week_end)}"
     )
+
+
+# ─────────────────────────────── admin panel ────────────────────────────────
+def admin_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="👥 مشاوران", callback_data=AdminCB(action="advisors"))
+    kb.button(text="👨‍🎓 دانش‌آموزان", callback_data=AdminCB(action="students"))
+    kb.button(text="📊 وضعیت سیستم", callback_data=AdminCB(action="system"))
+    kb.button(text="🤖 وضعیت ربات", callback_data=AdminCB(action="bot"))
+    kb.button(text="🗄 دیتابیس", callback_data=AdminCB(action="db"))
+    kb.button(text="📁 فایل‌ها", callback_data=AdminCB(action="storage"))
+    kb.button(text="📈 آمار", callback_data=AdminCB(action="stats"))
+    kb.button(text="📋 Audit Logs", callback_data=AdminCB(action="audit"))
+    kb.button(text="⚙️ تنظیمات", callback_data=AdminCB(action="settings"))
+    kb.button(text="⬅️ پنل مشاور", callback_data=Nav(to="menu"))
+    kb.adjust(2, 2, 2, 2, 2)
+    return kb.as_markup()
+
+
+def admin_back(action: str = "home", ref: int = 0) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔄 به‌روزرسانی", callback_data=AdminCB(action=action, ref=ref))
+    kb.button(text="⬅️ پنل مدیریت", callback_data=AdminCB(action="home"))
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def _admin_pager(kb: InlineKeyboardBuilder, action: str, page: int, total: int,
+                 size: int, ref: int = 0) -> None:
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            text="◀️ قبلی",
+            callback_data=AdminCB(action=action, page=page - 1, ref=ref).pack()))
+    if (page + 1) * size < total:
+        nav.append(InlineKeyboardButton(
+            text="بعدی ▶️",
+            callback_data=AdminCB(action=action, page=page + 1, ref=ref).pack()))
+    if nav:
+        kb.row(*nav)
+
+
+def admin_advisors(advisors, page: int, total: int, size: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for advisor, students, _plans in advisors:
+        dot = "🟢" if advisor.is_active else "🔒"
+        kb.row(InlineKeyboardButton(
+            text=f"{dot} {advisor.full_name} · {to_fa_digits(str(students))} دانش‌آموز"[:34],
+            callback_data=AdminCB(action="advisor", ref=advisor.id).pack()))
+    _admin_pager(kb, "advisors", page, total, size)
+    kb.row(InlineKeyboardButton(text="⬅️ پنل مدیریت",
+                                callback_data=AdminCB(action="home").pack()))
+    return kb.as_markup()
+
+
+def admin_advisor_card(advisor) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(
+            text="👨‍🎓 دانش‌آموزان",
+            callback_data=AdminCB(action="advisor_students", ref=advisor.id).pack()),
+        InlineKeyboardButton(
+            text="📅 برنامه‌ها",
+            callback_data=AdminCB(action="advisor_plans", ref=advisor.id).pack()),
+    )
+    kb.row(InlineKeyboardButton(
+        text="🔓 فعال‌سازی" if not advisor.is_active else "🔒 غیرفعال‌سازی",
+        callback_data=AdminCB(action="ask_suspend", ref=advisor.id).pack()))
+    kb.row(InlineKeyboardButton(text="⬅️ فهرست مشاوران",
+                                callback_data=AdminCB(action="advisors").pack()))
+    return kb.as_markup()
+
+
+def admin_students(students, page: int, total: int, size: int, ref: int = 0
+                   ) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for student in students:
+        dot = "🟢" if student.telegram_id else "🟡"
+        lock = "" if student.is_active else " 🔒"
+        kb.row(InlineKeyboardButton(
+            text=f"{dot} {student.full_name}{lock}"[:34],
+            callback_data=AdminCB(action="student", ref=student.id).pack()))
+    action = "advisor_students" if ref else "students"
+    _admin_pager(kb, action, page, total, size, ref)
+    back = (
+        AdminCB(action="advisor", ref=ref).pack() if ref
+        else AdminCB(action="home").pack()
+    )
+    kb.row(InlineKeyboardButton(text="⬅️ بازگشت", callback_data=back))
+    return kb.as_markup()
+
+
+def admin_student_card(student) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(
+        text="🔓 فعال‌سازی" if not student.is_active else "🔒 غیرفعال‌سازی",
+        callback_data=AdminCB(action="ask_suspend_student", ref=student.id).pack()))
+    kb.row(InlineKeyboardButton(text="⬅️ فهرست دانش‌آموزان",
+                                callback_data=AdminCB(action="students").pack()))
+    return kb.as_markup()
+
+
+def admin_confirm(action: str, ref: int, arg: str = "") -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ تأیید", callback_data=AdminCB(action=action, ref=ref, arg=arg))
+    kb.button(text="❌ انصراف", callback_data=AdminCB(action="home"))
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def admin_storage(orphans: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔄 به‌روزرسانی", callback_data=AdminCB(action="storage"))
+    if orphans:
+        kb.button(text="🧹 پاک‌سازی یتیم‌ها", callback_data=AdminCB(action="ask_cleanup"))
+    kb.button(text="⬅️ پنل مدیریت", callback_data=AdminCB(action="home"))
+    kb.adjust(1, 1, 1)
+    return kb.as_markup()
+
+
+def admin_system() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔄 به‌روزرسانی", callback_data=AdminCB(action="system"))
+    kb.button(text="📋 اجرای Health Check", callback_data=AdminCB(action="health"))
+    kb.button(text="⬅️ پنل مدیریت", callback_data=AdminCB(action="home"))
+    kb.adjust(2, 1)
+    return kb.as_markup()
+
+
+def admin_audit(page: int, total: int, size: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    _admin_pager(kb, "audit", page, total, size)
+    kb.row(InlineKeyboardButton(text="⬅️ پنل مدیریت",
+                                callback_data=AdminCB(action="home").pack()))
+    return kb.as_markup()
+
+
+def advisor_menu_with_admin() -> InlineKeyboardMarkup:
+    """Advisor menu plus the admin entry point (ADMIN_IDS only)."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ برنامه جدید", callback_data=Nav(to="new"))
+    kb.button(text="📂 برنامه‌های قبلی", callback_data=Nav(to="history"))
+    kb.button(text="📝 پیش‌نویس‌ها", callback_data=Nav(to="drafts"))
+    kb.button(text="👨‍🎓 دانش‌آموزان", callback_data=Nav(to="students"))
+    kb.button(text="🛠 پنل مدیریت", callback_data=AdminCB(action="home"))
+    kb.adjust(2, 2, 1)
+    return kb.as_markup()

@@ -76,13 +76,6 @@ def queue(tmp_path):
 
 @pytest.fixture()
 def bot_and_dp(queue, sessionmaker):
-    from app.bot.handlers import advisor as advisor_mod
-    from app.bot.handlers import common as common_mod
-    from app.bot.handlers import fallback as fallback_mod
-    from app.bot.handlers import student as student_mod
-
-    for module in (common_mod, student_mod, advisor_mod, fallback_mod):
-        module.router._parent_router = None
     bot, api = make_bot()
     return bot, api, build_dispatcher(queue, sessionmaker)
 

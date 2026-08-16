@@ -16,6 +16,7 @@ from ...config import settings
 from ...db.models import Role, User, WeeklyPlanDB
 from ...domain.models import SLOTS_PER_DAY, Activity
 from ...domain.persian import (
+    to_en_digits,
     jalali_short,
     parse_jalali,
     saturday_of,
@@ -23,9 +24,15 @@ from ...domain.persian import (
     today_local,
     week_label,
 )
+from ...security import is_admin
 from ...services.plan_manager import AccessDenied, PlanManager, StudentError
 from ...services.render_queue import RenderQueue
-from ..delivery import ensure_artifacts, input_for, remember_file_id
+from ..delivery import (
+    ensure_artifacts,
+    input_for,
+    is_inside_storage,
+    remember_file_id,
+)
 from .. import keyboards as kb
 from .. import texts as T
 from ..states import PlanFlow
@@ -49,6 +56,7 @@ def _is_advisor(user: User) -> bool:
     return user.role in (Role.ADVISOR, Role.ADMIN)
 
 
+
 router.message.filter(F.chat.type == "private")
 
 
@@ -56,8 +64,10 @@ router.message.filter(F.chat.type == "private")
 @router.callback_query(Nav.filter(F.to == "menu"))
 async def back_to_menu(cq: CallbackQuery, state: FSMContext, user: User) -> None:
     await state.clear()
-    await cq.message.edit_text(
-        T.MAIN_MENU, reply_markup=kb.advisor_menu(), parse_mode="HTML"
+    admin = is_admin(user, cq.from_user.id if cq.from_user else None)
+    await _safe_edit(
+        cq, T.MAIN_MENU,
+        kb.advisor_menu_with_admin() if admin else kb.advisor_menu(),
     )
     await cq.answer()
 
@@ -96,7 +106,7 @@ async def _show_students(
     size = settings.students_page_size
     students, total = await _list_students(manager, user, query, page, size)
     if not students and not query:
-        await _safe_edit(cq, T.NO_STUDENTS, kb.no_students(mode))
+        await _safe_edit(cq, T.NO_STUDENTS_EMPTY_STATE, kb.no_students(mode))
         await cq.answer()
         return
     title = T.STUDENTS_TITLE if mode == "card" else T.CHOOSE_STUDENT
@@ -139,15 +149,32 @@ async def add_student_input(
     raw = message.text.strip()
     if raw.startswith("/"):
         return
-    name, _, grade = raw.partition("|")
+    parts = [p.strip() for p in raw.split("|")]
+    name = parts[0] if parts else ""
+    grade = parts[1] if len(parts) > 1 else None
+    tg_id: int | None = None
+    if len(parts) > 2 and parts[2]:
+        digits = to_en_digits(parts[2])
+        if not digits.isdigit():
+            await message.answer(T.TG_ID_INVALID, reply_markup=kb.back_only("students"))
+            return
+        tg_id = int(digits)
+
     manager = PlanManager(session)
     try:
-        student = await manager.create_student(user, name, grade.strip() or None)
+        student = await manager.create_student(user, name, grade, tg_id)
     except StudentError as exc:
         await message.answer(f"⚠️ {exc}", reply_markup=kb.back_only("students"))
         return
 
     await state.clear()
+    if student.telegram_id:
+        await message.answer(
+            f"✅ <b>{student.full_name}</b> اضافه و به تلگرام وصل شد.",
+            reply_markup=kb.student_created(student),
+            parse_mode="HTML",
+        )
+        return
     link = await _invite_link(message.bot, student.invite_token)
     await message.answer(
         T.STUDENT_CREATED.format(name=student.full_name, link=link),
@@ -188,24 +215,163 @@ async def student_card(
     await cq.answer()
 
 
+@router.callback_query(StudentCB.filter(F.action == "connect"))
+async def student_connect(
+    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext,
+    user: User, session: AsyncSession,
+) -> None:
+    await state.clear()
+    manager = PlanManager(session)
+    student = await manager.get_student(user, callback_data.student_id)
+    status = (
+        T.STUDENT_STATUS_CONNECTED if student.telegram_id else T.STUDENT_STATUS_PENDING
+    )
+    await _safe_edit(
+        cq,
+        T.CONNECT_MENU.format(name=student.full_name, status=status),
+        kb.connect_menu(student),
+    )
+    await cq.answer()
+
+
 @router.callback_query(StudentCB.filter(F.action == "invite"))
 async def student_invite(
     cq: CallbackQuery, callback_data: StudentCB, user: User, session: AsyncSession
 ) -> None:
     manager = PlanManager(session)
     try:
-        token = await manager.new_invite(user, callback_data.student_id)
+        token, expires = await manager.new_invite(user, callback_data.student_id)
     except StudentError as exc:
         await cq.answer(str(exc), show_alert=True)
         return
     student = await manager.get_student(user, callback_data.student_id)
     link = await _invite_link(cq.bot, token)
     await cq.message.answer(
-        T.INVITE_TEXT.format(name=student.full_name, link=link),
-        reply_markup=kb.student_card(student),
+        T.INVITE_READY.format(
+            name=student.full_name, link=link, expires=jalali_short(expires.date())
+        ),
+        reply_markup=kb.invite_ready(student),
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
+    await cq.answer()
+
+
+@router.callback_query(StudentCB.filter(F.action == "revoke"))
+async def student_revoke_invite(
+    cq: CallbackQuery, callback_data: StudentCB, user: User, session: AsyncSession
+) -> None:
+    manager = PlanManager(session)
+    await manager.revoke_invite(user, callback_data.student_id)
+    student = await manager.get_student(user, callback_data.student_id)
+    await cq.answer(T.INVITE_REVOKED, show_alert=True)
+    await _safe_edit(
+        cq,
+        T.CONNECT_MENU.format(
+            name=student.full_name, status=T.STUDENT_STATUS_PENDING
+        ),
+        kb.connect_menu(student),
+    )
+
+
+@router.callback_query(StudentCB.filter(F.action == "setid"))
+async def student_set_id_prompt(
+    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext,
+    user: User, session: AsyncSession,
+) -> None:
+    manager = PlanManager(session)
+    student = await manager.get_student(user, callback_data.student_id)
+    await state.set_state(PlanFlow.link_student)
+    await state.update_data(student_id=student.id)
+    await _safe_edit(cq, T.SET_TG_ID_PROMPT, kb.connect_menu(student))
+    await cq.answer()
+
+
+@router.message(PlanFlow.link_student, F.text)
+async def student_set_id_input(
+    message: Message, state: FSMContext, user: User, session: AsyncSession
+) -> None:
+    raw = to_en_digits(message.text.strip())
+    if raw.startswith("/"):
+        return
+    if not raw.isdigit():
+        await message.answer(T.TG_ID_INVALID)
+        return
+    data = await state.get_data()
+    manager = PlanManager(session)
+    try:
+        student = await manager.link_telegram_id(user, int(data["student_id"]), int(raw))
+    except StudentError as exc:
+        await message.answer(f"⚠️ {exc}")
+        return
+    await state.clear()
+    await message.answer(
+        T.TG_ID_LINKED.format(name=student.full_name),
+        reply_markup=kb.student_card(student),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(StudentCB.filter(F.action == "edit"))
+async def student_edit_prompt(
+    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext,
+    user: User, session: AsyncSession,
+) -> None:
+    manager = PlanManager(session)
+    student = await manager.get_student(user, callback_data.student_id)
+    await state.set_state(PlanFlow.edit_student)
+    await state.update_data(student_id=student.id)
+    current = student.full_name + (f" | {student.grade}" if student.grade else "")
+    await _safe_edit(
+        cq,
+        T.EDIT_STUDENT_PROMPT.format(current=current),
+        kb.back_only("students"),
+    )
+    await cq.answer()
+
+
+@router.message(PlanFlow.edit_student, F.text)
+async def student_edit_input(
+    message: Message, state: FSMContext, user: User, session: AsyncSession
+) -> None:
+    raw = message.text.strip()
+    if raw.startswith("/"):
+        return
+    name, _, grade = raw.partition("|")
+    data = await state.get_data()
+    manager = PlanManager(session)
+    try:
+        student = await manager.edit_student(
+            user, int(data["student_id"]), name, grade.strip() or None
+        )
+    except StudentError as exc:
+        await message.answer(f"⚠️ {exc}")
+        return
+    await state.clear()
+    await message.answer(
+        T.STUDENT_UPDATED.format(name=student.full_name),
+        reply_markup=kb.student_card(student),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(StudentCB.filter(F.action == "thisweek"))
+async def student_this_week(
+    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext,
+    user: User, session: AsyncSession,
+) -> None:
+    """Open (or start) the plan for the current week of this student."""
+    manager = PlanManager(session)
+    student = await manager.get_student(user, callback_data.student_id)
+    start = saturday_of(today_local())
+    plan = await manager.plans.find_by_week(student.id, start)
+    if plan is None:
+        await cq.answer(T.NO_PLAN_THIS_WEEK)
+        await _open_or_create(cq, state, user, session, student.id, start)
+        return
+    await state.update_data(plan_id=plan.id)
+    await _safe_edit(cq, _overview_text(plan, manager),
+                     kb.days_overview(plan.id, PlanManager.to_domain(plan)))
     await cq.answer()
 
 
@@ -735,7 +901,7 @@ async def resend_file(
         return
 
     await ensure_artifacts(session, plan, queue)  # ephemeral disk safety net
-    file = input_for(plan, kind)
+    file = input_for(plan, kind, queue.service.storage_root)
     if file is None:
         await cq.answer(T.GENERIC_ERROR, show_alert=True)
         return
@@ -781,7 +947,8 @@ async def send_to_student(
         return
 
     await ensure_artifacts(session, plan, queue)
-    png, pdf = input_for(plan, "png"), input_for(plan, "pdf")
+    root = queue.service.storage_root
+    png, pdf = input_for(plan, "png", root), input_for(plan, "pdf", root)
     if png is None or pdf is None:
         await cq.answer(T.GENERIC_ERROR, show_alert=True)
         return
@@ -888,7 +1055,8 @@ async def plan_versions(
 
 @router.callback_query(FileCB.filter(F.action == "get"))
 async def fetch_version_file(
-    cq: CallbackQuery, callback_data: FileCB, user: User, session: AsyncSession
+    cq: CallbackQuery, callback_data: FileCB, user: User,
+    session: AsyncSession, queue: RenderQueue,
 ) -> None:
     manager = PlanManager(session)
     record = await manager.plans.file_by_id(callback_data.file_id)
@@ -897,11 +1065,7 @@ async def fetch_version_file(
         return
     plan = await manager.get_viewable(user, record.plan_id)  # authorization
     path = Path(record.image_path if callback_data.kind == "png" else record.pdf_path)
-    try:
-        inside = path.resolve().is_relative_to(Path(settings.storage_root).resolve())
-    except OSError:
-        inside = False
-    if not inside or not path.exists():
+    if not is_inside_storage(path, queue.service.storage_root) or not path.exists():
         await cq.answer(
             "فایل این نسخه روی سرور موجود نیست؛ می‌توانید دوباره تولید کنید.",
             show_alert=True,

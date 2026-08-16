@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...db.models import Role, User
 from ...repositories.repositories import PlanRepository
+from ...security import is_admin, is_admin_env
+from ...services.invites import InviteOutcome
 from ...services.plan_manager import PlanManager
 from .. import keyboards as kb
 from .. import texts as T
@@ -39,22 +41,49 @@ async def start_with_invite(
 
     token = payload[len(INVITE_PREFIX):]
     manager = PlanManager(session)
-    student = await manager.claim_invite(
-        token, message.from_user.id, message.from_user.username
+    result = await manager.claim_invite(
+        token,
+        message.from_user.id,
+        message.from_user.username,
+        actor=user,
+        is_admin_env=is_admin_env(message.from_user.id),
     )
-    if student is None:
-        # already-registered users just get their normal menu
-        if user is not None:
-            await _greet(message, user, session)
-        else:
-            await message.answer(T.INVITE_INVALID, parse_mode="HTML")
+
+    if result.outcome is InviteOutcome.ROLE_CONFLICT:
+        role_fa = (
+            T.ROLE_ADMIN_FA
+            if is_admin_env(message.from_user.id) or (user and user.role == Role.ADMIN)
+            else T.ROLE_ADVISOR_FA
+        )
+        await message.answer(
+            T.INVITE_ROLE_CONFLICT.format(role=role_fa),
+            reply_markup=kb.advisor_menu(),
+            parse_mode="HTML",
+        )
         return
 
-    log.info("invite claimed: student=%s tg=%s", student.id, message.from_user.id)
-    await message.answer(
-        T.STUDENT_WELCOME_LINKED.format(name=student.full_name), parse_mode="HTML"
-    )
-    await _greet(message, student, session)
+    if result.outcome is InviteOutcome.LINKED:
+        await message.answer(
+            T.STUDENT_WELCOME_LINKED.format(name=result.student.full_name),
+            parse_mode="HTML",
+        )
+        await _greet(message, result.student, session)
+        return
+
+    if result.outcome is InviteOutcome.ALREADY_SELF:
+        await message.answer(T.INVITE_ALREADY_SELF)
+        await _greet(message, user or result.student, session)
+        return
+
+    messages = {
+        InviteOutcome.ALREADY_LINKED: T.INVITE_ALREADY_LINKED,
+        InviteOutcome.CROSS_STUDENT: T.INVITE_CROSS_STUDENT,
+        InviteOutcome.EXPIRED: T.INVITE_EXPIRED,
+        InviteOutcome.INVALID: T.INVITE_INVALID,
+    }
+    await message.answer(messages[result.outcome], parse_mode="HTML")
+    if user is not None:  # keep an existing account inside its own world
+        await _greet(message, user, session)
 
 
 @router.message(CommandStart())
@@ -69,8 +98,16 @@ async def _greet(message: Message, user: User | None, session: AsyncSession) -> 
     if user is None:
         await message.answer(T.NOT_REGISTERED, parse_mode="HTML")
         return
+    if not user.is_active and not is_admin_env(user.telegram_id):
+        await message.answer(T.ACCOUNT_SUSPENDED)
+        return
     if user.role in (Role.ADVISOR, Role.ADMIN):
-        await message.answer(T.MAIN_MENU, reply_markup=kb.advisor_menu(), parse_mode="HTML")
+        admin = is_admin(user, message.from_user.id)
+        await message.answer(
+            T.MAIN_MENU,
+            reply_markup=kb.advisor_menu_with_admin() if admin else kb.advisor_menu(),
+            parse_mode="HTML",
+        )
         return
     latest = await PlanRepository(session).latest_for_student(user.id)
     await message.answer(

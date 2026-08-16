@@ -62,13 +62,6 @@ async def world(sessionmaker):
 
 @pytest.fixture()
 def bot_and_dp(tmp_path, sessionmaker):
-    from app.bot.handlers import advisor as advisor_mod
-    from app.bot.handlers import common as common_mod
-    from app.bot.handlers import fallback as fallback_mod
-    from app.bot.handlers import student as student_mod
-
-    for module in (common_mod, student_mod, advisor_mod, fallback_mod):
-        module.router._parent_router = None
     service = WeeklyPlanService(get_renderer("pillow"), storage_root=tmp_path)
     bot, api = make_bot()
     return bot, api, build_dispatcher(RenderQueue(service), sessionmaker)
@@ -372,3 +365,49 @@ async def test_unknown_callback_is_answered_not_hanging(bot_and_dp, world):
     answered = api.calls("AnswerCallbackQuery")
     assert answered, "orphan callback must still be answered"
     assert any("معتبر نیست" in (a.text or "") for a in answered)
+
+
+async def test_preview_then_generate_is_not_throttled(bot_and_dp, world):
+    """Regression: a shared render cooldown swallowed the generate press."""
+    from app.bot.middlewares import ThrottleMiddleware
+
+    bot, api, dp = bot_and_dp
+    pid = world["plan"]
+    await dp.feed_update(bot, callback_update(PlanCB(action="preview", plan_id=pid).pack(),
+                                              ADVISOR_TG, 1))
+    api.clear()
+    await dp.feed_update(bot, callback_update(PlanCB(action="generate", plan_id=pid).pack(),
+                                              ADVISOR_TG, 2))
+    assert api.calls("SendPhoto"), "generate right after preview must still run"
+
+    assert ThrottleMiddleware.HEAVY_ACTIONS  # documented list of protected actions
+
+
+async def test_double_click_on_the_same_render_button_is_suppressed():
+    """Deterministic unit check of the per-action cooldown (no rendering delay)."""
+    from aiogram.types import User as TgUser
+
+    from app.bot.middlewares import ThrottleMiddleware
+
+    middleware = ThrottleMiddleware(heavy_cooldown=30.0)
+    calls = []
+
+    async def handler(event, data):
+        calls.append(event.data)
+        return "ran"
+
+    class _Event:
+        def __init__(self, data):
+            self.data = data
+
+        async def answer(self, *a, **kw):
+            return None
+
+    data = {"event_from_user": TgUser(id=42, is_bot=False, first_name="x")}
+    assert await middleware(handler, _Event("p:generate:1:0"), data) == "ran"
+    assert await middleware(handler, _Event("p:generate:1:0"), data) is None  # dupe
+    # a different heavy action is NOT blocked by the previous one
+    assert await middleware(handler, _Event("p:preview:1:0"), data) == "ran"
+    # ordinary navigation is never blocked
+    assert await middleware(handler, _Event("n:menu"), data) == "ran"
+    assert calls == ["p:generate:1:0", "p:preview:1:0", "n:menu"]

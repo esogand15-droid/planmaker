@@ -65,7 +65,9 @@ class User(Base, TimestampMixin):
     grade: Mapped[str | None] = mapped_column(String(64))  # پایه/رشته دانش‌آموز
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     #: one-time token used by an advisor-created student to claim their account
-    invite_token: Mapped[str | None] = mapped_column(String(32), unique=True, index=True)
+    invite_token: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    invite_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invite_issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )

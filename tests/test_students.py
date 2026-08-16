@@ -21,6 +21,7 @@ from app.domain.models import Activity  # noqa: E402
 from app.domain.persian import saturday_of, today_local  # noqa: E402
 from app.rendering.factory import get_renderer  # noqa: E402
 from app.repositories.repositories import UserRepository  # noqa: E402
+from app.services.invites import InviteOutcome  # noqa: E402
 from app.services.plan_manager import PlanManager, StudentError  # noqa: E402
 from app.services.plan_service import WeeklyPlanService  # noqa: E402
 from app.services.render_queue import RenderQueue  # noqa: E402
@@ -59,13 +60,6 @@ def queue(tmp_path):
 
 @pytest.fixture()
 def bot_and_dp(queue, sessionmaker):
-    from app.bot.handlers import advisor as advisor_mod
-    from app.bot.handlers import common as common_mod
-    from app.bot.handlers import fallback as fallback_mod
-    from app.bot.handlers import student as student_mod
-
-    for module in (common_mod, student_mod, advisor_mod, fallback_mod):
-        module.router._parent_router = None
     bot, api = make_bot()
     return bot, api, build_dispatcher(queue, sessionmaker, admin_ids=(ADMIN_TG,))
 
@@ -135,15 +129,18 @@ async def test_invite_claim_binds_telegram_account(sessionmaker, advisors):
         token = student.invite_token
         await s.commit()
 
-        claimed = await manager.claim_invite(token, NEWCOMER_TG, "sara")
+        result = await manager.claim_invite(token, NEWCOMER_TG, "sara")
         await s.commit()
+        assert result.outcome is InviteOutcome.LINKED
+        claimed = result.student
         assert claimed.id == student.id
         assert claimed.telegram_id == NEWCOMER_TG
         assert claimed.invite_token is None      # one-time use
         assert claimed.is_connected
 
         # replaying the same token must fail
-        assert await manager.claim_invite(token, 99999, None) is None
+        replay = await manager.claim_invite(token, 99999, None)
+        assert replay.outcome is InviteOutcome.INVALID
 
 
 async def test_claiming_folds_away_a_stray_duplicate_row(sessionmaker, advisors):
@@ -155,9 +152,10 @@ async def test_claiming_folds_away_a_stray_duplicate_row(sessionmaker, advisors)
         student = await manager.create_student(advisor, "سارا محمدی")
         await s.commit()
 
-        await manager.claim_invite(student.invite_token, NEWCOMER_TG, None)
+        result = await manager.claim_invite(student.invite_token, NEWCOMER_TG, None)
         await s.commit()
 
+        assert result.outcome is InviteOutcome.LINKED
         assert (await manager.users.by_telegram_id(NEWCOMER_TG)).id == student.id
         refreshed = await manager.users.by_id(stray.id)
         assert refreshed.telegram_id is None and refreshed.is_active is False
@@ -286,7 +284,11 @@ async def test_student_card_shows_connection_state(bot_and_dp, sessionmaker, adv
     text = " ".join(api.texts())
     assert "نیما صادقی" in text and "یازدهم ریاضی" in text
     assert "در انتظار اتصال" in text
-    assert any("لینک دعوت" in b for b in buttons(api))
+    labels = buttons(api)
+    # the card offers the full management set required by the spec
+    for expected in ("برنامه این هفته", "برنامه جدید", "برنامه‌های قبلی",
+                     "ویرایش اطلاعات", "اتصال به تلگرام", "حذف دانش‌آموز"):
+        assert any(expected in b for b in labels), f"missing '{expected}': {labels}"
 
 
 async def test_remove_student_from_bot(bot_and_dp, sessionmaker, advisors):
@@ -487,3 +489,373 @@ async def test_file_deletion_refuses_paths_outside_storage(sessionmaker, advisor
         await manager.delete_plan(advisor, plan.id)
         await s.commit()
     assert outsider.exists(), "a path outside STORAGE_ROOT must never be deleted"
+
+
+# ════════════════════ invite security (expiry / one-time / revoke) ═════════
+async def test_invite_token_is_strong_and_unique(sessionmaker, advisors):
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        advisor = await manager.users.by_id(advisors["a"])
+        tokens = set()
+        for i in range(15):
+            student = await manager.create_student(advisor, f"دانش‌آموز {i}")
+            tokens.add(student.invite_token)
+        await s.commit()
+    assert len(tokens) == 15                      # no collisions
+    assert all(len(t) >= 24 for t in tokens)      # ≥140 bits of entropy
+    assert all(t.isascii() and " " not in t for t in tokens)
+
+
+async def test_invite_expires(sessionmaker, advisors):
+    from datetime import timezone as tz
+
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        advisor = await manager.users.by_id(advisors["a"])
+        student = await manager.create_student(advisor, "منقضی")
+        token, _ = await manager.new_invite(advisor, student.id)
+        # rewind the expiry into the past
+        student.invite_expires_at = datetime.now(tz.utc) - timedelta(minutes=1)
+        await s.commit()
+
+        assert (await manager.claim_invite(token, 4242, None)).outcome is InviteOutcome.EXPIRED
+        refreshed = await manager.users.by_id(student.id)
+        assert refreshed.telegram_id is None      # nothing was linked
+        actions = [a.action for a in await manager.audit.recent()]
+        assert "invite.expired" in actions
+
+
+async def test_invite_default_ttl_is_two_weeks(sessionmaker, advisors):
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        advisor = await manager.users.by_id(advisors["a"])
+        student = await manager.create_student(advisor, "مهلت‌دار")
+        _token, expires = await manager.new_invite(advisor, student.id)
+        delta = expires.date() - today_local()
+        assert 13 <= delta.days <= 14
+
+
+async def test_invite_can_be_revoked(sessionmaker, advisors):
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        advisor = await manager.users.by_id(advisors["a"])
+        student = await manager.create_student(advisor, "ابطالی")
+        token, _ = await manager.new_invite(advisor, student.id)
+        await manager.revoke_invite(advisor, student.id)
+        await s.commit()
+
+        assert (await manager.claim_invite(token, 5252, None)).outcome is InviteOutcome.INVALID
+        assert (await manager.users.by_id(student.id)).invite_token is None
+        assert "student.invite_revoked" in [a.action for a in await manager.audit.recent()]
+
+
+async def test_reissuing_an_invite_invalidates_the_previous_one(sessionmaker, advisors):
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        advisor = await manager.users.by_id(advisors["a"])
+        student = await manager.create_student(advisor, "چندبار")
+        first, _ = await manager.new_invite(advisor, student.id)
+        second, _ = await manager.new_invite(advisor, student.id)
+        await s.commit()
+
+        assert first != second
+        stale = await manager.claim_invite(first, 6161, None)
+        assert stale.outcome is InviteOutcome.INVALID                   # old link dead
+        fresh = await manager.claim_invite(second, 6161, None)
+        assert fresh.outcome is InviteOutcome.LINKED and fresh.student.id == student.id
+
+
+@pytest.mark.parametrize("forged", ["", "x", "short", "a" * 15, "../../etc/passwd",
+                                    "' OR 1=1 --", "inv_", "0" * 32])
+async def test_forged_tokens_never_link_anyone(sessionmaker, advisors, forged):
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        advisor = await manager.users.by_id(advisors["a"])
+        student = await manager.create_student(advisor, "امن")
+        await s.commit()
+        rejected = await manager.claim_invite(forged, 7171, None)
+        assert rejected.outcome is InviteOutcome.INVALID
+        assert (await manager.users.by_id(student.id)).telegram_id is None
+
+
+async def test_invite_cannot_rebind_a_connected_student(sessionmaker, advisors):
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        advisor = await manager.users.by_id(advisors["a"])
+        student = await manager.create_student(advisor, "قفل‌شده")
+        token, _ = await manager.new_invite(advisor, student.id)
+        await manager.users.attach_telegram_id(student, 8181)
+        student.invite_token = token           # simulate a leaked, stale link
+        await s.commit()
+
+        blocked = await manager.claim_invite(token, 9191, None)        # different person
+        assert blocked.outcome is InviteOutcome.ALREADY_LINKED
+        assert (await manager.users.by_id(student.id)).telegram_id == 8181
+
+
+async def test_manual_telegram_id_linking(sessionmaker, advisors):
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        advisor = await manager.users.by_id(advisors["a"])
+        student = await manager.create_student(advisor, "دستی")
+        linked = await manager.link_telegram_id(advisor, student.id, 3131)
+        await s.commit()
+        assert linked.telegram_id == 3131 and linked.invite_token is None
+
+        other = await manager.create_student(advisor, "دیگری")
+        with pytest.raises(StudentError):
+            await manager.link_telegram_id(advisor, other.id, 3131)  # already taken
+
+
+async def test_creating_with_taken_telegram_id_is_rejected(sessionmaker, advisors):
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        advisor = await manager.users.by_id(advisors["a"])
+        await manager.create_student(advisor, "اولی", telegram_id=2121)
+        with pytest.raises(StudentError):
+            await manager.create_student(advisor, "دومی", telegram_id=2121)
+
+
+# ════════════════════════════ profile editing ══════════════════════════════
+async def test_advisor_edits_own_student(sessionmaker, advisors):
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        advisor = await manager.users.by_id(advisors["a"])
+        student = await manager.create_student(advisor, "قدیم", "دهم")
+        updated = await manager.edit_student(advisor, student.id, "جدید", "یازدهم تجربی")
+        await s.commit()
+        assert updated.full_name == "جدید" and updated.grade == "یازدهم تجربی"
+        assert "student.edited" in [a.action for a in await manager.audit.recent()]
+
+
+async def test_advisor_cannot_edit_another_advisors_student(sessionmaker, advisors):
+    from app.services.plan_manager import AccessDenied
+
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        a = await manager.users.by_id(advisors["a"])
+        b = await manager.users.by_id(advisors["b"])
+        student = await manager.create_student(a, "مال A")
+        await s.commit()
+        with pytest.raises(AccessDenied):
+            await manager.edit_student(b, student.id, "هک‌شده", None)
+        with pytest.raises(AccessDenied):
+            await manager.link_telegram_id(b, student.id, 1010)
+        assert (await manager.users.by_id(student.id)).full_name == "مال A"
+
+
+async def test_edit_rejects_duplicate_name(sessionmaker, advisors):
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        advisor = await manager.users.by_id(advisors["a"])
+        await manager.create_student(advisor, "علی")
+        second = await manager.create_student(advisor, "رضا")
+        with pytest.raises(StudentError):
+            await manager.edit_student(advisor, second.id, "علی", None)
+
+
+# ══════════════════════ full connect flow through the bot ══════════════════
+async def test_connect_screen_and_manual_id_through_bot(bot_and_dp, sessionmaker, advisors):
+    bot, api, dp = bot_and_dp
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        advisor = await manager.users.by_id(advisors["a"])
+        student = await manager.create_student(advisor, "اتصالی")
+        await s.commit()
+        sid = student.id
+
+    api.clear()
+    await dp.feed_update(
+        bot, callback_update(StudentCB(action="connect", student_id=sid).pack(), ADVISOR_TG, 1)
+    )
+    labels = buttons(api)
+    assert any("لینک دعوت" in b for b in labels) and any("آیدی عددی" in b for b in labels)
+
+    api.clear()
+    await dp.feed_update(
+        bot, callback_update(StudentCB(action="invite", student_id=sid).pack(), ADVISOR_TG, 2)
+    )
+    text = " ".join(api.texts())
+    assert "?start=inv_" in text and "اعتبار تا" in text
+
+    api.clear()
+    await dp.feed_update(
+        bot, callback_update(StudentCB(action="revoke", student_id=sid).pack(), ADVISOR_TG, 3)
+    )
+    async with sessionmaker() as s:
+        assert (await UserRepository(s).by_id(sid)).invite_token is None
+
+    # manual numeric id path
+    await dp.feed_update(
+        bot, callback_update(StudentCB(action="setid", student_id=sid).pack(), ADVISOR_TG, 4)
+    )
+    api.clear()
+    await dp.feed_update(bot, message_update("۵۵۵۴۴۴", ADVISOR_TG, 5))  # persian digits
+    async with sessionmaker() as s:
+        assert (await UserRepository(s).by_id(sid)).telegram_id == 555444
+
+
+async def test_edit_student_through_bot(bot_and_dp, sessionmaker, advisors):
+    bot, api, dp = bot_and_dp
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        advisor = await manager.users.by_id(advisors["a"])
+        student = await manager.create_student(advisor, "قبلی", "دهم")
+        await s.commit()
+        sid = student.id
+
+    await dp.feed_update(
+        bot, callback_update(StudentCB(action="edit", student_id=sid).pack(), ADVISOR_TG, 1)
+    )
+    api.clear()
+    await dp.feed_update(bot, message_update("علی جدید | دوازدهم ریاضی", ADVISOR_TG, 2))
+    assert any("به‌روزرسانی" in t for t in api.texts())
+    async with sessionmaker() as s:
+        u = await UserRepository(s).by_id(sid)
+        assert u.full_name == "علی جدید" and u.grade == "دوازدهم ریاضی"
+
+
+async def test_add_student_with_optional_telegram_id_through_bot(
+    bot_and_dp, sessionmaker, advisors
+):
+    bot, api, dp = bot_and_dp
+    await dp.feed_update(
+        bot, callback_update(StudentCB(action="add", mode="card").pack(), ADVISOR_TG, 1)
+    )
+    api.clear()
+    await dp.feed_update(bot, message_update("سارا نوری | یازدهم | 777888", ADVISOR_TG, 2))
+    assert any("وصل شد" in t for t in api.texts())
+    async with sessionmaker() as s:
+        student = (await UserRepository(s).students_of(advisors["a"]))[0]
+        assert student.telegram_id == 777888 and student.invite_token is None
+
+
+async def test_this_week_button_opens_or_starts_the_plan(bot_and_dp, sessionmaker, advisors):
+    bot, api, dp = bot_and_dp
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        advisor = await manager.users.by_id(advisors["a"])
+        student = await manager.create_student(advisor, "این‌هفته‌ای")
+        await s.commit()
+        sid = student.id
+
+    api.clear()  # no plan yet → creates one and shows the 7-day overview
+    await dp.feed_update(
+        bot, callback_update(StudentCB(action="thisweek", student_id=sid).pack(), ADVISOR_TG, 1)
+    )
+    assert any("شنبه" in b for b in buttons(api))
+    async with sessionmaker() as s:
+        plan = await PlanManager(s).plans.find_by_week(sid, saturday_of(today_local()))
+        assert plan is not None
+
+    api.clear()  # second press → opens the same plan, no duplicate
+    await dp.feed_update(
+        bot, callback_update(StudentCB(action="thisweek", student_id=sid).pack(), ADVISOR_TG, 2)
+    )
+    async with sessionmaker() as s:
+        assert await PlanManager(s).plans.count_history(student_id=sid) == 1
+
+
+# ═════════════════════════ timezone boundary ═══════════════════════════════
+def test_midnight_tehran_week_boundary(monkeypatch):
+    """23:00 UTC Friday is already Saturday 02:30 in Tehran → next week starts."""
+    import app.domain.persian as persian
+
+    tehran = ZoneInfo("Asia/Tehran")
+    moment = datetime(2026, 8, 15, 2, 30, tzinfo=tehran)  # Saturday 02:30 Tehran
+    assert moment.astimezone(ZoneInfo("UTC")).date() == date(2026, 8, 14)  # Friday UTC
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment.astimezone(tz) if tz else moment
+
+    monkeypatch.setattr(persian, "datetime", _Frozen)
+    today = persian.today_local()
+    assert today == date(2026, 8, 15)
+    assert saturday_of(today) == today, "the Tehran week must roll over at local midnight"
+
+
+# ═════════════════════════ file / version authorization ════════════════════
+async def test_version_files_are_authorization_checked(bot_and_dp, sessionmaker, advisors,
+                                                       queue, tmp_path):
+    from app.bot.texts import FileCB
+
+    bot, api, dp = bot_and_dp
+    async with sessionmaker() as s:
+        manager = PlanManager(s, storage_root=queue.service.storage_root)
+        a = await manager.users.by_id(advisors["a"])
+        student = await manager.create_student(a, "صاحب فایل")
+        plan = await manager.create_plan(a, student.id, saturday_of(today_local()))
+        await manager.set_slot(a, plan.id, "saturday", 0, Activity(0, subject="زیست"))
+        await s.commit()
+        result = await queue.generate(PlanManager.to_domain(plan), force=True)
+        record = await manager.plans.mark_generated(
+            plan, image_path=str(result.png_path), pdf_path=str(result.pdf_path),
+            plan_hash=result.plan_hash, template_version=result.template_version,
+            renderer_version=result.renderer, duration_ms=1,
+        )
+        await s.commit()
+        file_id = record.id
+
+    # advisor B forges the version file id
+    api.clear()
+    await dp.feed_update(
+        bot,
+        callback_update(FileCB(action="get", file_id=file_id, kind="pdf").pack(),
+                        OTHER_ADVISOR_TG, 1),
+    )
+    assert api.calls("SendDocument") == [], "IDOR: another advisor downloaded the file"
+
+    # the owner can
+    api.clear()
+    await dp.feed_update(
+        bot,
+        callback_update(FileCB(action="get", file_id=file_id, kind="pdf").pack(),
+                        ADVISOR_TG, 2),
+    )
+    assert len(api.calls("SendDocument")) == 1
+
+
+async def test_version_list_is_authorization_checked(bot_and_dp, sessionmaker, advisors):
+    bot, api, dp = bot_and_dp
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        a = await manager.users.by_id(advisors["a"])
+        student = await manager.create_student(a, "نسخه‌دار")
+        plan = await manager.create_plan(a, student.id, saturday_of(today_local()))
+        await s.commit()
+        pid = plan.id
+
+    api.clear()
+    await dp.feed_update(
+        bot, callback_update(PlanCB(action="versions", plan_id=pid).pack(),
+                             OTHER_ADVISOR_TG, 1)
+    )
+    assert not any("نسخه‌های تولیدشده" in t for t in api.texts())
+
+
+async def test_student_list_idor_via_callback(bot_and_dp, sessionmaker, advisors):
+    """Advisor B forges every student-scoped callback of advisor A's student."""
+    bot, api, dp = bot_and_dp
+    async with sessionmaker() as s:
+        manager = PlanManager(s)
+        a = await manager.users.by_id(advisors["a"])
+        student = await manager.create_student(a, "هدف")
+        await s.commit()
+        sid = student.id
+
+    for action in ("card", "edit", "connect", "invite", "revoke", "setid",
+                   "thisweek", "ask_del", "del"):
+        api.clear()
+        await dp.feed_update(
+            bot,
+            callback_update(StudentCB(action=action, student_id=sid).pack(),
+                            OTHER_ADVISOR_TG, 1),
+        )
+        assert not any("هدف" in t for t in api.texts()), f"leak via '{action}'"
+
+    async with sessionmaker() as s:
+        survivor = await UserRepository(s).by_id(sid)
+        assert survivor.full_name == "هدف" and survivor.telegram_id is None
+        assert len(await UserRepository(s).students_of(advisors["a"])) == 1

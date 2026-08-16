@@ -5,7 +5,6 @@ from aiogram.filters.callback_data import CallbackData
 
 from ..domain.models import WEEKDAY_FA, WEEKDAY_KEYS
 
-BRAND = "رتبه لند"
 HEADER = "📋 برنامه هفتگی · رتبه لند"
 
 
@@ -16,7 +15,9 @@ class Nav(CallbackData, prefix="n"):
 
 
 class StudentCB(CallbackData, prefix="st"):
-    action: str          # pick | card | page | search | add | invite | ask_del | del
+    # pick | card | page | search | add | edit | connect | invite | revoke
+    # | setid | thisweek | ask_del | del
+    action: str
     student_id: int = 0
     page: int = 0
     mode: str = "pick"   # pick = choose for a plan, card = manage the student
@@ -68,6 +69,127 @@ class AssignCB(CallbackData, prefix="a"):
     index: int = 0
 
 
+class AdminCB(CallbackData, prefix="ad"):
+    """Admin panel navigation. Every handler re-checks ADMIN_IDS server-side."""
+
+    action: str          # home | advisors | students | system | bot | db | storage
+                         # | stats | audit | settings | view | suspend | ask_* | do_*
+    ref: int = 0
+    page: int = 0
+    arg: str = ""
+
+
+ADMIN_MENU = (
+    "╭────────────────────────────╮\n"
+    "  🛠 <b>پنل مدیریت رتبه لند</b>\n"
+    "╰────────────────────────────╯\n\n"
+    "نسخه {version} · {env}"
+)
+ADMIN_ONLY = "⛔️ این بخش فقط برای مدیر سیستم است."
+ADMIN_ADVISORS = "👥 <b>مشاوران</b> ({count})"
+ADMIN_NO_ADVISORS = (
+    "👥 <b>مشاوران</b>\n\nهنوز مشاوری ثبت نشده است.\n"
+    "با دستور زیر اضافه کنید:\n"
+    "<code>python -m tools.manage add-advisor \"نام\" --telegram-id &lt;ID&gt;</code>"
+)
+ADMIN_ADVISOR_CARD = (
+    "👤 <b>{name}</b>\n"
+    "{status_line}"
+    "🆔 <code>{telegram}</code>\n"
+    "👨‍🎓 دانش‌آموزان: {students}\n"
+    "📅 برنامه‌ها: {plans} (این هفته: {this_week})\n"
+    "🕐 آخرین فعالیت: {last_seen}"
+)
+ADMIN_STUDENTS = "👨‍🎓 <b>دانش‌آموزان</b> ({count})"
+ADMIN_STUDENT_CARD = (
+    "👤 <b>{name}</b>\n"
+    "{grade_line}"
+    "وضعیت: {status}\n"
+    "مشاور: {advisor}\n"
+    "📅 برنامه‌ها: {plans}\n"
+    "🗓 ثبت: {created}"
+)
+ADMIN_SYSTEM = (
+    "📊 <b>وضعیت سیستم</b>\n\n"
+    "🤖 ربات        {bot}\n"
+    "🗄 PostgreSQL  {db}\n"
+    "⚡ Redis        {redis}\n"
+    "🎨 Renderer    {renderer}\n"
+    "🌐 Chromium    {chromium}\n"
+    "🔤 libraqm     {raqm}\n"
+    "💾 Storage     {storage}\n"
+    "❤️ Health      {health}\n\n"
+    "⏱ تأخیر دیتابیس: {db_latency}\n"
+    "🧵 رندرهای در جریان: {inflight}\n"
+    "⏳ آپ‌تایم: {uptime}"
+)
+ADMIN_BOT = (
+    "🤖 <b>وضعیت ربات</b>\n\n"
+    "وضعیت: {status}\n"
+    "حالت: {mode}\n"
+    "آپ‌تایم: {uptime}\n"
+    "نسخه: {version}\n"
+    "قالب: {template}\n"
+    "رندرر: {renderer}\n"
+    "Fallback: {fallback}\n"
+    "آخرین راه‌اندازی: {started}"
+)
+ADMIN_DB = (
+    "🗄 <b>دیتابیس</b>\n\n"
+    "PostgreSQL {status}\n\n"
+    "👥 کاربران: {users}\n"
+    "🧑‍🏫 مشاوران: {advisors}\n"
+    "👨‍🎓 دانش‌آموزان: {students}\n"
+    "📋 برنامه‌ها: {plans}\n"
+    "📝 پیش‌نویس‌ها: {drafts}\n"
+    "🗂 فایل‌های ثبت‌شده: {files}\n\n"
+    "⏱ تأخیر: {latency}"
+)
+ADMIN_STORAGE = (
+    "📁 <b>فایل‌ها و Storage</b>\n\n"
+    "مسیر: <code>{path}</code>\n"
+    "Volume: {mounted}\n\n"
+    "🖼 PNG: {png}\n"
+    "📄 PDF: {pdf}\n"
+    "📦 مجموع: {total} فایل · {size}\n"
+    "🗑 فایل‌های یتیم: {orphans}"
+)
+ADMIN_STATS = (
+    "📈 <b>آمار</b>\n\n"
+    "👥 مشاوران: {advisors}\n"
+    "👨‍🎓 دانش‌آموزان: {students}\n"
+    "📋 برنامه‌ها: {plans}\n"
+    "📝 پیش‌نویس‌ها: {drafts}\n"
+    "📤 ارسال‌شده: {sent}\n"
+    "🎨 تولیدشده: {generated}\n\n"
+    "<b>بازه‌ها</b>\n"
+    "امروز: {today}\n"
+    "این هفته: {week}\n"
+    "این ماه: {month}\n"
+    "کل: {all_time}"
+)
+ADMIN_AUDIT = "📋 <b>Audit Logs</b> — صفحه {page}"
+ADMIN_SETTINGS = (
+    "⚙️ <b>تنظیمات</b> (فقط خواندنی — از Environment Variables می‌آید)\n\n"
+    "محیط: {env}\n"
+    "منطقه زمانی: {tz}\n"
+    "رندرر: {backend}\n"
+    "مقیاس چاپ: {scale} · DPI: {dpi}\n"
+    "هم‌زمانی رندر: {concurrency}\n"
+    "نگه‌داری: {retention}\n"
+    "مدیران: {admins} نفر\n"
+    "Storage: <code>{storage}</code>"
+)
+ADMIN_CONFIRM = "⚠️ آیا مطمئن هستید؟\n\n{what}\n\nاین عملیات قابل بازگشت نیست."
+ADMIN_SUSPENDED = "🔒 حساب «{name}» غیرفعال شد."
+ADMIN_ACTIVATED = "🔓 حساب «{name}» فعال شد."
+ADMIN_CLEANUP_DONE = "🧹 {plans} برنامه و {files} فایل پاک شد."
+ADMIN_HEALTH_OK = "✅ همه سرویس‌ها سالم هستند."
+ACCOUNT_SUSPENDED = (
+    "🔒 حساب شما موقتاً غیرفعال شده است.\n"
+    "برای پیگیری با مدیر سیستم تماس بگیرید."
+)
+
 MAIN_MENU = (
     f"<b>{HEADER}</b>\n\n"
     "سامانه برنامه‌ریزی هفتگی مشاوران.\n"
@@ -90,10 +212,45 @@ STUDENTS_TITLE = (
 ADD_STUDENT_PROMPT = (
     "➕ <b>دانش‌آموز جدید</b>\n\n"
     "نام و نام خانوادگی را بفرستید.\n"
-    "اگر خواستید پایه/رشته را هم اضافه کنید، با <code>|</code> جدا کنید:\n\n"
+    "پایه/رشته و آیدی عددی تلگرام <b>اختیاری</b> هستند و با <code>|</code> جدا می‌شوند:\n\n"
     "<code>علی رضایی</code>\n"
-    "<code>علی رضایی | دوازدهم تجربی</code>"
+    "<code>علی رضایی | دوازدهم تجربی</code>\n"
+    "<code>علی رضایی | دوازدهم تجربی | 123456789</code>"
 )
+EDIT_STUDENT_PROMPT = (
+    "✏️ <b>ویرایش اطلاعات</b>\n\n"
+    "اطلاعات فعلی:\n<code>{current}</code>\n\n"
+    "مقدار جدید را به همین شکل بفرستید:\n<code>نام | پایه</code>"
+)
+STUDENT_UPDATED = "✅ اطلاعات <b>{name}</b> به‌روزرسانی شد."
+NO_STUDENTS_EMPTY_STATE = (
+    "👨‍🎓 <b>دانش‌آموزان شما</b>\n\n"
+    "هنوز دانش‌آموزی ثبت نکرده‌اید.\n"
+    "با افزودن اولین دانش‌آموز، می‌توانید برنامه هفتگی او را همین‌جا بسازید."
+)
+CONNECT_MENU = (
+    "🔗 <b>اتصال {name} به تلگرام</b>\n\n"
+    "{status}\n\n"
+    "دو راه دارید:\n"
+    "• <b>لینک دعوت</b> بسازید و برایش بفرستید (ساده‌ترین راه)\n"
+    "• اگر آیدی عددی تلگرامش را دارید، مستقیم ثبت کنید"
+)
+INVITE_READY = (
+    "🔗 <b>لینک اتصال آماده شد</b>\n\n"
+    "این لینک را برای <b>{name}</b> بفرستید:\n\n"
+    "<code>{link}</code>\n\n"
+    "⏳ اعتبار تا {expires}\n"
+    "🔒 یک‌بارمصرف — پس از اتصال باطل می‌شود."
+)
+INVITE_REVOKED = "🚫 لینک دعوت باطل شد."
+SET_TG_ID_PROMPT = (
+    "🔢 آیدی عددی تلگرام دانش‌آموز را بفرستید (فقط عدد):\n"
+    "<code>123456789</code>\n\n"
+    "دانش‌آموز می‌تواند با فرستادن <code>/id</code> به همین ربات، آیدی خود را ببیند."
+)
+TG_ID_INVALID = "⚠️ آیدی باید فقط عدد باشد."
+TG_ID_LINKED = "✅ <b>{name}</b> به تلگرام وصل شد."
+NO_PLAN_THIS_WEEK = "برای این هفته هنوز برنامه‌ای ساخته نشده است."
 STUDENT_CREATED = (
     "✅ <b>{name}</b> اضافه شد.\n\n"
     "برای اینکه برنامه‌ها مستقیم به تلگرام او برود، لینک زیر را برایش بفرستید؛ "
@@ -109,13 +266,30 @@ STUDENT_CARD = (
 )
 STUDENT_STATUS_CONNECTED = "🟢 متصل به ربات"
 STUDENT_STATUS_PENDING = "🟡 در انتظار اتصال (لینک دعوت را بفرستید)"
-INVITE_TEXT = (
-    "🔗 <b>لینک دعوت {name}</b>\n\n"
-    "{link}\n\n"
-    "این لینک را برای دانش‌آموز بفرستید. با باز کردن آن، حسابش به شما وصل می‌شود "
-    "و برنامه‌ها مستقیم برایش ارسال خواهد شد."
+INVITE_REVOKED = "🚫 لینک دعوت باطل شد."
+SET_TG_ID_PROMPT = (
+    "🔢 آیدی عددی تلگرام دانش‌آموز را بفرستید (فقط عدد):\n"
+    "<code>123456789</code>\n\n"
+    "دانش‌آموز می‌تواند با فرستادن <code>/id</code> به همین ربات، آیدی خود را ببیند."
 )
-INVITE_ALREADY_CONNECTED = "این دانش‌آموز از قبل به ربات متصل است."
+TG_ID_INVALID = "⚠️ آیدی باید فقط عدد باشد."
+TG_ID_LINKED = "✅ <b>{name}</b> به تلگرام وصل شد."
+NO_PLAN_THIS_WEEK = "برای این هفته هنوز برنامه‌ای ساخته نشده است."
+STUDENT_CREATED = (
+    "✅ <b>{name}</b> اضافه شد.\n\n"
+    "برای اینکه برنامه‌ها مستقیم به تلگرام او برود، لینک زیر را برایش بفرستید؛ "
+    "با یک‌بار باز کردن، حسابش وصل می‌شود:\n\n"
+    "{link}\n\n"
+    "بدون این کار هم می‌توانید همین حالا برایش برنامه بسازید و فایل را دستی بفرستید."
+)
+STUDENT_CARD = (
+    "👤 <b>{name}</b>\n"
+    "{grade_line}"
+    "وضعیت: {status}\n"
+    "📅 برنامه‌ها: {plans}"
+)
+STUDENT_STATUS_CONNECTED = "🟢 متصل به ربات"
+STUDENT_STATUS_PENDING = "🟡 در انتظار اتصال (لینک دعوت را بفرستید)"
 STUDENT_REMOVED = "🗑 دانش‌آموز از فهرست شما حذف شد. (برنامه‌های قبلی حذف نشدند)"
 CONFIRM_REMOVE_STUDENT = (
     "حذف <b>{name}</b> از فهرست شما؟\n"
@@ -125,6 +299,29 @@ STUDENT_WELCOME_LINKED = (
     "🎉 خوش آمدی <b>{name}</b>!\n\n"
     "حساب شما به مشاورتان وصل شد. از این پس برنامه هفتگی مستقیم همین‌جا برایتان می‌آید."
 )
+INVITE_ROLE_CONFLICT = (
+    "⚠️ این لینک دعوت برای یک <b>دانش‌آموز</b> ایجاد شده است.\n\n"
+    "شما در حال حاضر با حساب {role} وارد شده‌اید و نمی‌توانید از لینک دعوت "
+    "دانش‌آموز استفاده کنید.\n\n"
+    "اگر این لینک را اشتباهی باز کرده‌اید جای نگرانی نیست؛ "
+    "نقش و دسترسی حساب شما <b>تغییر نکرده است</b>."
+)
+INVITE_ALREADY_LINKED = (
+    "⚠️ این دانش‌آموز قبلاً به یک حساب تلگرام متصل شده است.\n\n"
+    "برای دریافت دسترسی، با مشاور یا پشتیبانی تماس بگیرید."
+)
+INVITE_CROSS_STUDENT = (
+    "⚠️ این لینک برای حساب شما صادر نشده است.\n\n"
+    "از مشاور خود بخواهید لینک مخصوص شما را بفرستد."
+)
+INVITE_EXPIRED = (
+    "⏳ مهلت این لینک دعوت تمام شده است.\n\n"
+    "از مشاور خود یک لینک تازه بخواهید."
+)
+INVITE_ALREADY_SELF = "✅ حساب شما قبلاً متصل شده است."
+ROLE_ADMIN_FA = "مدیر"
+ROLE_ADVISOR_FA = "مشاور"
+
 INVITE_INVALID = (
     "این لینک دعوت معتبر نیست یا قبلاً استفاده شده است.\n"
     "از مشاور خود یک لینک تازه بخواهید."
@@ -200,7 +397,6 @@ HISTORY_EMPTY = "برنامه‌ای ثبت نشده است."
 DELETED = "🗑 برنامه حذف شد."
 COPIED_WEEK = "📋 {count} فعالیت از هفته قبل کپی شد."
 NO_PREVIOUS_WEEK = "برنامه‌ای برای هفته‌های قبل این دانش‌آموز پیدا نشد."
-DISCARD_CONFIRM = "تغییرات این مرحله ذخیره نشود؟"
 
 SLOT_EMPTY = "خالی"
 DAY_TITLE = "📅 <b>{day}</b> — {date}\n\nروی هر ردیف بزنید تا ویرایش شود."
