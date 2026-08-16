@@ -248,12 +248,12 @@ class PlanManager:
         )
         return student
 
-    async def remove_student(self, advisor: User, student_id: int) -> None:
-        """Detach a student from this advisor (plans and data are preserved)."""
+    async def detach_student(self, advisor: User, student_id: int) -> None:
+        """Only drop the advisor↔student link (used when transferring students)."""
         student = await self.ensure_owns_student(advisor, student_id)
         await self.users.unlink_student(advisor.id, student.id)
         await self.audit.log(
-            "student.removed", actor_id=advisor.id, student_id=student.id
+            "student.detached", actor_id=advisor.id, student_id=student.id
         )
 
     # ------------------------------------------------------------ mapping --
@@ -290,16 +290,22 @@ class PlanManager:
         )
         domain.week_start = plan.week_start
         domain.week_end = plan.week_end
+        # days outside the stored range keep date=None and stay empty on the sheet
         return domain
 
     # --------------------------------------------------------- operations --
     async def create_plan(
-        self, advisor: User, student_id: int, week_start: date
+        self, advisor: User, student_id: int, week_start: date, week_end: date | None = None
     ) -> WeeklyPlanDB:
+        """`week_end` omitted → classic Saturday→Friday calendar week."""
         from datetime import timedelta
+
+        from ..domain.calendar import JalaliDate
 
         self.ensure_active(advisor)
         student = await self.ensure_owns_student(advisor, student_id)
+        end = week_end or week_start + timedelta(days=6)
+        JalaliDate.validate_range(week_start, end)
         existing = await self.plans.find_by_week(student.id, week_start)
         if existing is not None:
             return existing
@@ -307,7 +313,7 @@ class PlanManager:
             student_id=student.id,
             advisor_id=advisor.id,
             week_start=week_start,
-            week_end=week_start + timedelta(days=6),
+            week_end=end,
         )
         await self.audit.log(
             "plan.created", actor_id=advisor.id, plan_id=plan.id, student_id=student.id

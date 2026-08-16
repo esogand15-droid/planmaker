@@ -61,7 +61,9 @@ class User(Base, TimestampMixin):
     full_name: Mapped[str] = mapped_column(String(120), nullable=False)
     username: Mapped[str | None] = mapped_column(String(64))
     phone: Mapped[str | None] = mapped_column(String(24))
-    role: Mapped[Role] = mapped_column(Enum(Role, native_enum=False), default=Role.STUDENT)
+    role: Mapped[Role] = mapped_column(
+        Enum(Role, native_enum=False), default=Role.STUDENT, index=True
+    )
     grade: Mapped[str | None] = mapped_column(String(64))  # پایه/رشته دانش‌آموز
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     #: one-time token used by an advisor-created student to claim their account
@@ -110,6 +112,8 @@ class WeeklyPlanDB(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_plan_student_week", "student_id", "week_start"),
         Index("ix_plan_advisor_status", "advisor_id", "status"),
+        # drafts are listed newest-first per advisor
+        Index("ix_plan_advisor_updated", "advisor_id", "updated_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

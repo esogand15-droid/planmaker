@@ -15,6 +15,8 @@ class PlanFlow(StatesGroup):
     link_student = State()
     select_week = State()
     custom_week = State()
+    range_start = State()
+    range_end = State()
     edit_day = State()
     edit_slot = State()
     edit_assignments = State()

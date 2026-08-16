@@ -105,6 +105,21 @@ class HtmlRenderer(BaseRenderer):
                 "— HTML backend disabled, using the Pillow renderer"
             )
             return False
+        # A present binary is not the same as a runnable one: a host may lack the
+        # shared libraries (libnspr4/libnss3…). Probe an actual launch once.
+        try:
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch()
+                browser.close()
+        except Exception as exc:
+            log.warning(
+                "Chromium present but not runnable (%s) — using the Pillow renderer. "
+                "Install the system libraries with: playwright install --with-deps chromium",
+                type(exc).__name__,
+            )
+            return False
         return True
 
     # ------------------------------------------------------------------

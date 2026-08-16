@@ -171,7 +171,7 @@ async def test_invite_refused_for_connected_student(sessionmaker, advisors):
             await manager.new_invite(advisor, student.id)
 
 
-async def test_removing_student_keeps_their_plans(sessionmaker, advisors):
+async def test_detaching_student_keeps_their_plans(sessionmaker, advisors):
     async with sessionmaker() as s:
         manager = PlanManager(s)
         advisor = await manager.users.by_id(advisors["a"])
@@ -179,11 +179,12 @@ async def test_removing_student_keeps_their_plans(sessionmaker, advisors):
         plan = await manager.create_plan(advisor, student.id, saturday_of(today_local()))
         await s.commit()
 
-        await manager.remove_student(advisor, student.id)
+        await manager.detach_student(advisor, student.id)
         await s.commit()
 
         assert await manager.users.students_of(advisor.id) == []
         assert await manager.plans.get(plan.id) is not None  # data preserved
+        assert await manager.users.by_id(student.id) is not None
 
 
 async def test_advisor_cannot_manage_other_advisors_student(sessionmaker, advisors):
@@ -198,7 +199,7 @@ async def test_advisor_cannot_manage_other_advisors_student(sessionmaker, adviso
         for call in (
             manager.get_student(b, student.id),
             manager.new_invite(b, student.id),
-            manager.remove_student(b, student.id),
+            manager.detach_student(b, student.id),
         ):
             with pytest.raises(AccessDenied):
                 await call
@@ -283,7 +284,8 @@ async def test_student_card_shows_connection_state(bot_and_dp, sessionmaker, adv
     )
     text = " ".join(api.texts())
     assert "نیما صادقی" in text and "یازدهم ریاضی" in text
-    assert "در انتظار اتصال" in text
+    assert "لینک دعوت صادر شده" in text          # real connection state
+    assert "?start=inv_" in text                  # the usable link is right there
     labels = buttons(api)
     # the card offers the full management set required by the spec
     for expected in ("برنامه این هفته", "برنامه جدید", "برنامه‌های قبلی",
@@ -291,7 +293,7 @@ async def test_student_card_shows_connection_state(bot_and_dp, sessionmaker, adv
         assert any(expected in b for b in labels), f"missing '{expected}': {labels}"
 
 
-async def test_remove_student_from_bot(bot_and_dp, sessionmaker, advisors):
+async def test_delete_student_from_bot(bot_and_dp, sessionmaker, advisors):
     bot, api, dp = bot_and_dp
     async with sessionmaker() as s:
         manager = PlanManager(s)
@@ -304,12 +306,17 @@ async def test_remove_student_from_bot(bot_and_dp, sessionmaker, advisors):
         bot, callback_update(StudentCB(action="ask_del", student_id=sid).pack(),
                              ADVISOR_TG, 1)
     )
+    await dp.feed_update(
+        bot, callback_update(StudentCB(action="del_confirm", student_id=sid).pack(),
+                             ADVISOR_TG, 2)
+    )
     api.clear()
     await dp.feed_update(
-        bot, callback_update(StudentCB(action="del", student_id=sid).pack(), ADVISOR_TG, 2)
+        bot, callback_update(StudentCB(action="del", student_id=sid).pack(), ADVISOR_TG, 3)
     )
     async with sessionmaker() as s:
         assert await UserRepository(s).students_of(advisors["a"]) == []
+        assert await UserRepository(s).by_id(sid) is None  # really gone
 
 
 async def test_unknown_user_is_not_registered_silently(bot_and_dp, sessionmaker):
@@ -410,7 +417,7 @@ async def test_student_plans_list_from_the_card(bot_and_dp, sessionmaker, adviso
 # ─────────────────────────── timezone & retention ───────────────────────────
 def test_today_follows_tehran_not_the_server(monkeypatch):
     """At 01:00 Tehran the UTC server is still on the previous day."""
-    import app.domain.persian as persian
+    import app.domain.calendar as persian
 
     tehran_after_midnight = datetime(2026, 8, 16, 1, 0, tzinfo=ZoneInfo("Asia/Tehran"))
     assert tehran_after_midnight.astimezone(ZoneInfo("UTC")).date() == date(2026, 8, 15)
@@ -421,7 +428,7 @@ def test_today_follows_tehran_not_the_server(monkeypatch):
             return tehran_after_midnight.astimezone(tz) if tz else tehran_after_midnight
 
     monkeypatch.setattr(persian, "datetime", _FrozenDateTime)
-    assert persian.today_local() == date(2026, 8, 16)  # Tehran's date, not UTC's
+    assert persian.JalaliDate.today() == date(2026, 8, 16)  # Tehran's date, not UTC's
 
 
 def test_week_starts_on_saturday_in_local_time():
@@ -669,7 +676,7 @@ async def test_connect_screen_and_manual_id_through_bot(bot_and_dp, sessionmaker
         bot, callback_update(StudentCB(action="connect", student_id=sid).pack(), ADVISOR_TG, 1)
     )
     labels = buttons(api)
-    assert any("لینک دعوت" in b for b in labels) and any("آیدی عددی" in b for b in labels)
+    assert any("لینک" in b for b in labels) and any("آیدی عددی" in b for b in labels)
 
     api.clear()
     await dp.feed_update(
@@ -759,7 +766,7 @@ async def test_this_week_button_opens_or_starts_the_plan(bot_and_dp, sessionmake
 # ═════════════════════════ timezone boundary ═══════════════════════════════
 def test_midnight_tehran_week_boundary(monkeypatch):
     """23:00 UTC Friday is already Saturday 02:30 in Tehran → next week starts."""
-    import app.domain.persian as persian
+    import app.domain.calendar as persian
 
     tehran = ZoneInfo("Asia/Tehran")
     moment = datetime(2026, 8, 15, 2, 30, tzinfo=tehran)  # Saturday 02:30 Tehran
@@ -771,7 +778,7 @@ def test_midnight_tehran_week_boundary(monkeypatch):
             return moment.astimezone(tz) if tz else moment
 
     monkeypatch.setattr(persian, "datetime", _Frozen)
-    today = persian.today_local()
+    today = persian.JalaliDate.today()
     assert today == date(2026, 8, 15)
     assert saturday_of(today) == today, "the Tehran week must roll over at local midnight"
 

@@ -29,8 +29,9 @@ def advisor_menu() -> InlineKeyboardMarkup:
     kb.button(text="➕ برنامه جدید", callback_data=Nav(to="new"))
     kb.button(text="📂 برنامه‌های قبلی", callback_data=Nav(to="history"))
     kb.button(text="📝 پیش‌نویس‌ها", callback_data=Nav(to="drafts"))
-    kb.button(text="👨‍🎓 دانش‌آموزان", callback_data=Nav(to="students"))
-    kb.adjust(2, 2)
+    kb.button(text="👨‍🎓 دانش‌آموزان من", callback_data=Nav(to="students"))
+    kb.button(text="👨‍🏫 پروفایل من", callback_data=Nav(to="profile"))
+    kb.adjust(2, 2, 1)
     return kb.as_markup()
 
 
@@ -39,9 +40,18 @@ def student_menu(has_plan: bool) -> InlineKeyboardMarkup:
     if has_plan:
         kb.button(text="📅 برنامه این هفته", callback_data=Nav(to="my_last"))
         kb.button(text="📆 برنامه‌های قبلی", callback_data=Nav(to="my_history"))
-        kb.adjust(1, 1)
+        kb.button(text="👨‍🎓 پروفایل من", callback_data=Nav(to="profile"))
+        kb.adjust(1, 1, 1)
     else:
         kb.button(text="🔄 بررسی مجدد", callback_data=Nav(to="my_last"))
+        kb.button(text="👨‍🎓 پروفایل من", callback_data=Nav(to="profile"))
+        kb.adjust(1, 1)
+    return kb.as_markup()
+
+
+def profile_back(is_student: bool) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ بازگشت", callback_data=Nav(to="menu" if not is_student else "student_menu"))
     return kb.as_markup()
 
 
@@ -104,9 +114,18 @@ def no_students(mode: str = "card") -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def student_card(student: User) -> InlineKeyboardMarkup:
+def student_card(student: User, invite_link: str | None = None) -> InlineKeyboardMarkup:
     sid = student.id
     kb = InlineKeyboardBuilder()
+    if invite_link:
+        kb.row(
+            InlineKeyboardButton(
+                text="📋 کپی لینک دعوت",
+                callback_data=StudentCB(action="copylink", student_id=sid).pack()),
+            InlineKeyboardButton(
+                text="📤 ارسال لینک",
+                callback_data=StudentCB(action="sharelink", student_id=sid).pack()),
+        )
     kb.row(
         InlineKeyboardButton(
             text="📅 برنامه این هفته",
@@ -151,10 +170,21 @@ def connect_menu(student: User) -> InlineKeyboardMarkup:
     sid = student.id
     kb = InlineKeyboardBuilder()
     if not student.telegram_id:
+        if student.invite_token:
+            kb.row(
+                InlineKeyboardButton(
+                    text="📋 کپی لینک",
+                    callback_data=StudentCB(action="copylink", student_id=sid).pack()),
+                InlineKeyboardButton(
+                    text="📤 ارسال لینک",
+                    callback_data=StudentCB(action="sharelink", student_id=sid).pack()),
+            )
         kb.row(
             InlineKeyboardButton(
-                text="🔗 ساخت لینک دعوت",
-                callback_data=StudentCB(action="invite", student_id=sid).pack(),
+                text="🔄 ساخت لینک جدید" if student.invite_token else "🔗 ساخت لینک دعوت",
+                callback_data=StudentCB(
+                    action="ask_invite" if student.invite_token else "invite",
+                    student_id=sid).pack(),
             )
         )
         kb.row(
@@ -170,6 +200,12 @@ def connect_menu(student: User) -> InlineKeyboardMarkup:
                     callback_data=StudentCB(action="revoke", student_id=sid).pack(),
                 )
             )
+    else:
+        kb.row(
+            InlineKeyboardButton(
+                text="🔓 قطع اتصال",
+                callback_data=StudentCB(action="unlink", student_id=sid).pack()),
+        )
     kb.row(
         InlineKeyboardButton(
             text="⬅️ بازگشت",
@@ -179,13 +215,23 @@ def connect_menu(student: User) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def confirm_new_invite(student_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ ساخت لینک جدید",
+              callback_data=StudentCB(action="invite", student_id=student_id))
+    kb.button(text="❌ انصراف",
+              callback_data=StudentCB(action="connect", student_id=student_id))
+    kb.adjust(1, 1)
+    return kb.as_markup()
+
+
 def invite_ready(student: User) -> InlineKeyboardMarkup:
     sid = student.id
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(
-            text="🔄 لینک تازه",
-            callback_data=StudentCB(action="invite", student_id=sid).pack(),
+            text="📋 کپی لینک",
+            callback_data=StudentCB(action="copylink", student_id=sid).pack(),
         ),
         InlineKeyboardButton(
             text="🚫 ابطال لینک",
@@ -201,12 +247,19 @@ def invite_ready(student: User) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def confirm_remove_student(student_id: int) -> InlineKeyboardMarkup:
+def confirm_remove_student(student_id: int, final: bool = False) -> InlineKeyboardMarkup:
+    """Two-step confirmation: 'ادامه' first, then the irreversible button."""
     kb = InlineKeyboardBuilder()
-    kb.button(
-        text="🗑 بله، حذف شود",
-        callback_data=StudentCB(action="del", student_id=student_id),
-    )
+    if final:
+        kb.button(
+            text="🗑 حذف قطعی",
+            callback_data=StudentCB(action="del", student_id=student_id),
+        )
+    else:
+        kb.button(
+            text="➡️ ادامه",
+            callback_data=StudentCB(action="del_confirm", student_id=student_id),
+        )
     kb.button(
         text="❌ انصراف",
         callback_data=StudentCB(action="card", student_id=student_id, mode="card"),
@@ -241,7 +294,7 @@ def week_choices(student_id: int, this_saturday: date) -> InlineKeyboardMarkup:
         callback_data=WeekCB(action="pick", student_id=student_id, offset=1),
     )
     kb.button(
-        text="🗓 تاریخ دلخواه",
+        text="🗓 بازه دلخواه (شروع تا پایان)",
         callback_data=WeekCB(action="custom", student_id=student_id),
     )
     kb.button(text="⬅️ بازگشت", callback_data=Nav(to="new"))
@@ -249,16 +302,33 @@ def week_choices(student_id: int, this_saturday: date) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def days_overview(plan_id: int, domain: WeeklyPlan) -> InlineKeyboardMarkup:
+def range_summary(student_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    for day in domain.days:
+    kb.button(text="✅ تأیید بازه", callback_data=WeekCB(action="confirm", student_id=student_id))
+    kb.button(text="✏️ اصلاح", callback_data=WeekCB(action="custom", student_id=student_id))
+    kb.adjust(1, 1)
+    return kb.as_markup()
+
+
+def days_overview(plan_id: int, domain: WeeklyPlan) -> InlineKeyboardMarkup:
+    """Only the real days of the range, in chronological order."""
+    from ..domain.calendar import JalaliDate
+
+    kb = InlineKeyboardBuilder()
+    days = domain.plan_days
+    for position, day in enumerate(days, start=1):
         filled = day.filled_count
         mark = f"{to_fa_digits(str(filled))}/{to_fa_digits(str(SLOTS_PER_DAY))}" if filled else "—"
+        prefix = "" if domain.is_calendar_week else f"{to_fa_digits(str(position))}️⃣ "
+        label = f"{prefix}{day.fa_name}"
+        if not domain.is_calendar_week and day.date:
+            label += f" — {JalaliDate.day_month(day.date)}"
         kb.button(
-            text=f"{day.fa_name}  ·  {mark}",
+            text=f"{label}  ·  {mark}"[:34],
             callback_data=DayCB(action="open", plan_id=plan_id, day=day.weekday),
         )
-    kb.adjust(2, 2, 2, 1)
+    rows = [2] * (len(days) // 2) + ([1] if len(days) % 2 else [])
+    kb.adjust(*(rows or [1]))
     kb.row(
         InlineKeyboardButton(
             text="📝 تکالیف", callback_data=AssignCB(action="open", plan_id=plan_id).pack()
@@ -322,16 +392,17 @@ def day_editor(plan_id: int, domain: WeeklyPlan, weekday: str) -> InlineKeyboard
     return kb.as_markup()
 
 
-def copy_day_targets(plan_id: int, src: str) -> InlineKeyboardMarkup:
+def copy_day_targets(plan_id: int, src: str,
+                     domain: WeeklyPlan | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    for key in WEEKDAY_KEYS:
-        if key == src:
-            continue
+    keys = [d.weekday for d in domain.plan_days] if domain else list(WEEKDAY_KEYS)
+    targets = [k for k in keys if k != src]
+    for key in targets:
         kb.button(
             text=T.day_fa(key),
             callback_data=DayCB(action="copyto", plan_id=plan_id, day=src, arg=key),
         )
-    kb.adjust(3, 3)
+    kb.adjust(*([3] * (len(targets) // 3) + ([len(targets) % 3] if len(targets) % 3 else []) or [1]))
     kb.row(
         InlineKeyboardButton(
             text="⬅️ بازگشت",
@@ -541,17 +612,18 @@ def plan_header(plan: WeeklyPlanDB) -> str:
 # ─────────────────────────────── admin panel ────────────────────────────────
 def admin_menu() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="👥 مشاوران", callback_data=AdminCB(action="advisors"))
-    kb.button(text="👨‍🎓 دانش‌آموزان", callback_data=AdminCB(action="students"))
-    kb.button(text="📊 وضعیت سیستم", callback_data=AdminCB(action="system"))
+    kb.button(text="👥 مدیریت مشاوران", callback_data=AdminCB(action="advisors"))
+    kb.button(text="👨‍🎓 مدیریت دانش‌آموزان", callback_data=AdminCB(action="students"))
+    kb.button(text="📋 مدیریت برنامه‌ها", callback_data=AdminCB(action="plans"))
+    kb.button(text="📁 مدیریت فایل‌ها", callback_data=AdminCB(action="storage"))
+    kb.button(text="🗄 پایگاه داده", callback_data=AdminCB(action="db"))
+    kb.button(text="📊 آمار و گزارش‌ها", callback_data=AdminCB(action="stats"))
+    kb.button(text="🧾 گزارش فعالیت‌ها", callback_data=AdminCB(action="audit"))
+    kb.button(text="❤️ سلامت سیستم", callback_data=AdminCB(action="system"))
     kb.button(text="🤖 وضعیت ربات", callback_data=AdminCB(action="bot"))
-    kb.button(text="🗄 دیتابیس", callback_data=AdminCB(action="db"))
-    kb.button(text="📁 فایل‌ها", callback_data=AdminCB(action="storage"))
-    kb.button(text="📈 آمار", callback_data=AdminCB(action="stats"))
-    kb.button(text="📋 Audit Logs", callback_data=AdminCB(action="audit"))
-    kb.button(text="⚙️ تنظیمات", callback_data=AdminCB(action="settings"))
+    kb.button(text="⚙️ تنظیمات مدیریت", callback_data=AdminCB(action="settings"))
     kb.button(text="⬅️ پنل مشاور", callback_data=Nav(to="menu"))
-    kb.adjust(2, 2, 2, 2, 2)
+    kb.adjust(2, 2, 2, 2, 2, 1)
     return kb.as_markup()
 
 
@@ -565,17 +637,20 @@ def admin_back(action: str = "home", ref: int = 0) -> InlineKeyboardMarkup:
 
 def _admin_pager(kb: InlineKeyboardBuilder, action: str, page: int, total: int,
                  size: int, ref: int = 0) -> None:
-    nav: list[InlineKeyboardButton] = []
+    pages = max(1, -(-total // size))
+    row: list[InlineKeyboardButton] = []
     if page > 0:
-        nav.append(InlineKeyboardButton(
-            text="◀️ قبلی",
+        row.append(InlineKeyboardButton(
+            text="⬅️ قبلی",
             callback_data=AdminCB(action=action, page=page - 1, ref=ref).pack()))
+    row.append(InlineKeyboardButton(
+        text=f"{to_fa_digits(str(page + 1))} / {to_fa_digits(str(pages))}",
+        callback_data="noop"))
     if (page + 1) * size < total:
-        nav.append(InlineKeyboardButton(
-            text="بعدی ▶️",
+        row.append(InlineKeyboardButton(
+            text="بعدی ➡️",
             callback_data=AdminCB(action=action, page=page + 1, ref=ref).pack()))
-    if nav:
-        kb.row(*nav)
+    kb.row(*row)
 
 
 def admin_advisors(advisors, page: int, total: int, size: int) -> InlineKeyboardMarkup:
@@ -586,8 +661,12 @@ def admin_advisors(advisors, page: int, total: int, size: int) -> InlineKeyboard
             text=f"{dot} {advisor.full_name} · {to_fa_digits(str(students))} دانش‌آموز"[:34],
             callback_data=AdminCB(action="advisor", ref=advisor.id).pack()))
     _admin_pager(kb, "advisors", page, total, size)
-    kb.row(InlineKeyboardButton(text="⬅️ پنل مدیریت",
-                                callback_data=AdminCB(action="home").pack()))
+    kb.row(
+        InlineKeyboardButton(text="🔎 جستجوی مشاور",
+                             callback_data=AdminCB(action="search_advisor").pack()),
+        InlineKeyboardButton(text="⬅️ پنل مدیریت",
+                             callback_data=AdminCB(action="home").pack()),
+    )
     return kb.as_markup()
 
 
@@ -601,11 +680,52 @@ def admin_advisor_card(advisor) -> InlineKeyboardMarkup:
             text="📅 برنامه‌ها",
             callback_data=AdminCB(action="advisor_plans", ref=advisor.id).pack()),
     )
+    kb.row(
+        InlineKeyboardButton(
+            text="✏️ ویرایش",
+            callback_data=AdminCB(action="edit_advisor", ref=advisor.id).pack()),
+        InlineKeyboardButton(
+            text="🔓 فعال‌سازی" if not advisor.is_active else "🔒 تعلیق",
+            callback_data=AdminCB(action="ask_suspend", ref=advisor.id).pack()),
+    )
     kb.row(InlineKeyboardButton(
-        text="🔓 فعال‌سازی" if not advisor.is_active else "🔒 غیرفعال‌سازی",
-        callback_data=AdminCB(action="ask_suspend", ref=advisor.id).pack()))
+        text="🗑 حذف مشاور",
+        callback_data=AdminCB(action="ask_del_advisor", ref=advisor.id).pack()))
     kb.row(InlineKeyboardButton(text="⬅️ فهرست مشاوران",
                                 callback_data=AdminCB(action="advisors").pack()))
+    return kb.as_markup()
+
+
+def admin_delete_advisor(advisor_id: int, has_students: bool) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if has_students:
+        kb.row(InlineKeyboardButton(
+            text="👤 انتقال دانش‌آموزان به مشاور دیگر",
+            callback_data=AdminCB(action="del_advisor_pick", ref=advisor_id).pack()))
+        kb.row(InlineKeyboardButton(
+            text="📦 بدون مشاور (حذف برنامه‌های او)",
+            callback_data=AdminCB(action="del_advisor", ref=advisor_id,
+                                  arg="detach").pack()))
+    else:
+        kb.row(InlineKeyboardButton(
+            text="🗑 حذف قطعی",
+            callback_data=AdminCB(action="del_advisor", ref=advisor_id,
+                                  arg="detach").pack()))
+    kb.row(InlineKeyboardButton(
+        text="❌ انصراف", callback_data=AdminCB(action="advisor", ref=advisor_id).pack()))
+    return kb.as_markup()
+
+
+def admin_pick_advisor(candidates, source_id: int, action: str) -> InlineKeyboardMarkup:
+    """Target picker for transfers (student → advisor, or advisor deletion)."""
+    kb = InlineKeyboardBuilder()
+    for advisor in candidates:
+        kb.row(InlineKeyboardButton(
+            text=f"👨‍🏫 {advisor.full_name}"[:34],
+            callback_data=AdminCB(action=action, ref=source_id,
+                                  arg=str(advisor.id)).pack()))
+    kb.row(InlineKeyboardButton(text="❌ انصراف",
+                                callback_data=AdminCB(action="home").pack()))
     return kb.as_markup()
 
 
@@ -624,23 +744,97 @@ def admin_students(students, page: int, total: int, size: int, ref: int = 0
         AdminCB(action="advisor", ref=ref).pack() if ref
         else AdminCB(action="home").pack()
     )
-    kb.row(InlineKeyboardButton(text="⬅️ بازگشت", callback_data=back))
+    row = [InlineKeyboardButton(text="⬅️ بازگشت", callback_data=back)]
+    if not ref:
+        row.insert(0, InlineKeyboardButton(
+            text="🔎 جستجوی دانش‌آموز",
+            callback_data=AdminCB(action="search_student").pack()))
+    kb.row(*row)
     return kb.as_markup()
 
 
 def admin_student_card(student) -> InlineKeyboardMarkup:
+    sid = student.id
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(
-        text="🔓 فعال‌سازی" if not student.is_active else "🔒 غیرفعال‌سازی",
-        callback_data=AdminCB(action="ask_suspend_student", ref=student.id).pack()))
+    kb.row(
+        InlineKeyboardButton(text="✏️ ویرایش",
+                             callback_data=AdminCB(action="edit_student", ref=sid).pack()),
+        InlineKeyboardButton(text="🔄 تغییر مشاور",
+                             callback_data=AdminCB(action="transfer", ref=sid).pack()),
+    )
+    kb.row(
+        InlineKeyboardButton(text="🔗 مدیریت اتصال",
+                             callback_data=AdminCB(action="connection", ref=sid).pack()),
+        InlineKeyboardButton(text="📅 برنامه‌ها",
+                             callback_data=AdminCB(action="student_plans", ref=sid).pack()),
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="🔓 فعال‌سازی" if not student.is_active else "🔒 غیرفعال‌سازی",
+            callback_data=AdminCB(action="ask_suspend_student", ref=sid).pack()),
+        InlineKeyboardButton(text="🗑 حذف",
+                             callback_data=AdminCB(action="ask_del_student", ref=sid).pack()),
+    )
     kb.row(InlineKeyboardButton(text="⬅️ فهرست دانش‌آموزان",
                                 callback_data=AdminCB(action="students").pack()))
     return kb.as_markup()
 
 
-def admin_confirm(action: str, ref: int, arg: str = "") -> InlineKeyboardMarkup:
+def admin_connection(student) -> InlineKeyboardMarkup:
+    sid = student.id
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ تأیید", callback_data=AdminCB(action=action, ref=ref, arg=arg))
+    if not student.telegram_id:
+        kb.row(InlineKeyboardButton(
+            text="🔗 ساخت لینک جدید",
+            callback_data=AdminCB(action="reissue", ref=sid).pack()))
+        if student.invite_token:
+            kb.row(InlineKeyboardButton(
+                text="♻️ لغو لینک قبلی",
+                callback_data=AdminCB(action="revoke_invite", ref=sid).pack()))
+    else:
+        kb.row(InlineKeyboardButton(
+            text="🔓 قطع اتصال",
+            callback_data=AdminCB(action="ask_unlink", ref=sid).pack()))
+    kb.row(InlineKeyboardButton(text="⬅️ بازگشت",
+                                callback_data=AdminCB(action="student", ref=sid).pack()))
+    return kb.as_markup()
+
+
+def admin_plans(plans, page: int, total: int, size: int, ref: int = 0,
+                action: str = "plans") -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for plan in plans:
+        label = f"📅 {week_label(plan.week_start, plan.week_end)} · {plan.student.full_name}"
+        kb.row(InlineKeyboardButton(
+            text=label[:34],
+            callback_data=AdminCB(action="plan", ref=plan.id).pack()))
+    _admin_pager(kb, action, page, total, size, ref)
+    kb.row(InlineKeyboardButton(text="⬅️ پنل مدیریت",
+                                callback_data=AdminCB(action="home").pack()))
+    return kb.as_markup()
+
+
+def admin_plan_card(plan) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if plan.image_path or plan.image_file_id:
+        kb.row(
+            InlineKeyboardButton(text="🖼 تصویر",
+                                 callback_data=PlanCB(action="png", plan_id=plan.id).pack()),
+            InlineKeyboardButton(text="📄 پی‌دی‌اف",
+                                 callback_data=PlanCB(action="pdf", plan_id=plan.id).pack()),
+        )
+    kb.row(InlineKeyboardButton(
+        text="🗑 حذف برنامه",
+        callback_data=AdminCB(action="ask_del_plan", ref=plan.id).pack()))
+    kb.row(InlineKeyboardButton(text="⬅️ فهرست برنامه‌ها",
+                                callback_data=AdminCB(action="plans").pack()))
+    return kb.as_markup()
+
+
+def admin_confirm(action: str, ref: int, arg: str = "",
+                  label: str = "✅ تأیید") -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text=label, callback_data=AdminCB(action=action, ref=ref, arg=arg))
     kb.button(text="❌ انصراف", callback_data=AdminCB(action="home"))
     kb.adjust(2)
     return kb.as_markup()
@@ -648,9 +842,10 @@ def admin_confirm(action: str, ref: int, arg: str = "") -> InlineKeyboardMarkup:
 
 def admin_storage(orphans: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="🔄 به‌روزرسانی", callback_data=AdminCB(action="storage"))
+    kb.button(text="🔄 بررسی مجدد", callback_data=AdminCB(action="storage"))
     if orphans:
-        kb.button(text="🧹 پاک‌سازی یتیم‌ها", callback_data=AdminCB(action="ask_cleanup"))
+        kb.button(text="🧹 پاک‌سازی فایل‌های یتیم",
+                  callback_data=AdminCB(action="ask_cleanup"))
     kb.button(text="⬅️ پنل مدیریت", callback_data=AdminCB(action="home"))
     kb.adjust(1, 1, 1)
     return kb.as_markup()
@@ -659,7 +854,7 @@ def admin_storage(orphans: int) -> InlineKeyboardMarkup:
 def admin_system() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🔄 به‌روزرسانی", callback_data=AdminCB(action="system"))
-    kb.button(text="📋 اجرای Health Check", callback_data=AdminCB(action="health"))
+    kb.button(text="📋 بررسی سلامت", callback_data=AdminCB(action="health"))
     kb.button(text="⬅️ پنل مدیریت", callback_data=AdminCB(action="home"))
     kb.adjust(2, 1)
     return kb.as_markup()
@@ -679,7 +874,8 @@ def advisor_menu_with_admin() -> InlineKeyboardMarkup:
     kb.button(text="➕ برنامه جدید", callback_data=Nav(to="new"))
     kb.button(text="📂 برنامه‌های قبلی", callback_data=Nav(to="history"))
     kb.button(text="📝 پیش‌نویس‌ها", callback_data=Nav(to="drafts"))
-    kb.button(text="👨‍🎓 دانش‌آموزان", callback_data=Nav(to="students"))
+    kb.button(text="👨‍🎓 دانش‌آموزان من", callback_data=Nav(to="students"))
+    kb.button(text="👨‍🏫 پروفایل من", callback_data=Nav(to="profile"))
     kb.button(text="🛠 پنل مدیریت", callback_data=AdminCB(action="home"))
-    kb.adjust(2, 2, 1)
+    kb.adjust(2, 2, 2)
     return kb.as_markup()

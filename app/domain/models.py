@@ -14,28 +14,15 @@ from datetime import date
 from enum import Enum
 from typing import Any
 
+from .calendar import WEEKDAY_FA as _WEEKDAY_FA
+from .calendar import WEEKDAY_KEYS as _WEEKDAY_KEYS
+
 SLOTS_PER_DAY = 8
 DAYS_PER_WEEK = 7
 
-WEEKDAY_KEYS = [
-    "saturday",
-    "sunday",
-    "monday",
-    "tuesday",
-    "wednesday",
-    "thursday",
-    "friday",
-]
-
-WEEKDAY_FA = {
-    "saturday": "شنبه",
-    "sunday": "یکشنبه",
-    "monday": "دوشنبه",
-    "tuesday": "سه‌شنبه",
-    "wednesday": "چهارشنبه",
-    "thursday": "پنجشنبه",
-    "friday": "جمعه",
-}
+# weekday names live in exactly one place — the calendar engine
+WEEKDAY_KEYS = list(_WEEKDAY_KEYS)
+WEEKDAY_FA = dict(_WEEKDAY_FA)
 
 
 class PlanStatus(str, Enum):
@@ -158,21 +145,61 @@ class WeeklyPlan:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
     def __post_init__(self) -> None:
-        if not self.days:
-            self.days = [PlanDay(weekday=k) for k in WEEKDAY_KEYS]
+        # The official sheet always has all seven rows; a custom range simply
+        # leaves the rows outside it without a date (and therefore empty).
+        present = {d.weekday for d in self.days}
+        self.days.extend(
+            PlanDay(weekday=key) for key in WEEKDAY_KEYS if key not in present
+        )
         self.days.sort(key=lambda d: WEEKDAY_KEYS.index(d.weekday))
         if self.week_start:
             self.apply_week_start(self.week_start)
 
     # -- week helpers -------------------------------------------------
     def apply_week_start(self, start: date) -> None:
-        """Assign consecutive dates saturday..friday from `start`."""
+        """Calendar-week mode: snaps to the real Saturday, then Saturday→Friday."""
         from datetime import timedelta
 
+        from .calendar import JalaliDate
+
+        saturday = JalaliDate.saturday_of(start)
+        self.apply_range(saturday, saturday + timedelta(days=6))
+
+    def apply_range(self, start: date, end: date) -> None:
+        """Custom-range mode: only the real days in [start, end] get a date.
+
+        The weekday of every day comes from the actual calendar, so a range
+        that begins mid-week fills exactly the rows it belongs in and leaves
+        the other rows of the official template empty.
+        """
+        from .calendar import JalaliDate
+
         self.week_start = start
-        self.week_end = start + timedelta(days=6)
-        for i, day in enumerate(self.days):
-            day.date = start + timedelta(days=i)
+        self.week_end = end
+        in_range = {d.weekday_key: d.date for d in JalaliDate.range(start, end)}
+        for day in self.days:
+            day.date = in_range.get(day.weekday)
+
+    @property
+    def plan_days(self) -> list["PlanDay"]:
+        """Days that actually belong to the range, in chronological order."""
+        dated = [d for d in self.days if d.date is not None]
+        return sorted(dated, key=lambda d: d.date)
+
+    @property
+    def is_calendar_week(self) -> bool:
+        from datetime import timedelta
+
+        return bool(
+            self.week_start
+            and self.week_end
+            and self.week_end - self.week_start == timedelta(days=6)
+            and len(self.plan_days) == 7
+        )
+
+    @property
+    def day_count(self) -> int:
+        return len(self.plan_days)
 
     def day(self, weekday: str) -> PlanDay:
         for d in self.days:
@@ -183,11 +210,11 @@ class WeeklyPlan:
     # -- stats --------------------------------------------------------
     @property
     def activity_count(self) -> int:
-        return sum(d.filled_count for d in self.days)
+        return sum(d.filled_count for d in self.plan_days)
 
     @property
     def filled_days(self) -> int:
-        return len([d for d in self.days if not d.is_empty])
+        return len([d for d in self.plan_days if not d.is_empty])
 
     @property
     def is_empty(self) -> bool:
@@ -210,6 +237,11 @@ class WeeklyPlan:
         ]
 
     def duplicate(self, new_week_start: date) -> "WeeklyPlan":
+        """Copy the plan onto a new start date, preserving the range length.
+
+        A calendar week stays a calendar week (snapped to Saturday); a custom
+        range keeps its own length and starts exactly where asked.
+        """
         clone = WeeklyPlan(
             student_name=self.student_name,
             student_id=self.student_id,
@@ -235,7 +267,13 @@ class WeeklyPlan:
             ],
             assignments=[Assignment(text=a.text, order=a.order) for a in self.assignments],
         )
-        clone.apply_week_start(new_week_start)
+        from datetime import timedelta
+
+        if self.is_calendar_week or self.week_start is None or self.week_end is None:
+            clone.apply_week_start(new_week_start)
+        else:
+            span = (self.week_end - self.week_start).days
+            clone.apply_range(new_week_start, new_week_start + timedelta(days=span))
         return clone
 
     # -- serialization / caching --------------------------------------

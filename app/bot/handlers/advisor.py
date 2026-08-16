@@ -3,7 +3,7 @@ preview → confirm → generate → deliver → send to student."""
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 from aiogram import F, Router
@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...config import settings
 from ...db.models import Role, User, WeeklyPlanDB
 from ...domain.models import SLOTS_PER_DAY, Activity
+from ...domain.calendar import DateRangeError, JalaliDate
 from ...domain.persian import (
     to_en_digits,
     jalali_short,
@@ -25,6 +26,7 @@ from ...domain.persian import (
     week_label,
 )
 from ...security import is_admin
+from ...services.deletion import DeletionService
 from ...services.plan_manager import AccessDenied, PlanManager, StudentError
 from ...services.render_queue import RenderQueue
 from ..delivery import (
@@ -191,28 +193,460 @@ async def _invite_link(bot, token: str | None) -> str:
     return f"https://t.me/{me.username}?start=inv_{token}"
 
 
+def _overview_text(plan: WeeklyPlanDB, manager: PlanManager) -> str:
+    domain = manager.to_domain(plan)
+    mode = "هفته تقویمی" if domain.is_calendar_week else "بازه دلخواه"
+    return (
+        f"<b>{T.HEADER}</b>\n\n"
+        f"{kb.plan_header(plan)}\n"
+        f"📆 {mode} · {to_fa_digits(str(domain.day_count))} روز\n\n"
+        f"📚 فعالیت‌ها: {to_fa_digits(str(domain.activity_count))}"
+        f" · 📝 تکالیف: {to_fa_digits(str(len(domain.assignments)))}\n"
+        f"🧩 نسخه {to_fa_digits(str(plan.version))}\n\n"
+        "روز مورد نظر را انتخاب کنید:"
+    )
+
+
+async def _open_or_create(
+    cq: CallbackQuery, state: FSMContext, user: User, session: AsyncSession,
+    student_id: int, start: date, end: date | None = None,
+) -> None:
+    manager = PlanManager(session)
+    plan = await manager.create_plan(user, student_id, start, end)
+    await state.set_state(PlanFlow.edit_day)
+    await state.update_data(plan_id=plan.id, student_id=student_id)
+    await cq.message.edit_text(
+        _overview_text(plan, manager),
+        reply_markup=kb.days_overview(plan.id, PlanManager.to_domain(plan)),
+        parse_mode="HTML",
+    )
+    await cq.answer()
+
+
+@router.callback_query(StudentCB.filter(F.action == "page"))
+async def students_page(
+    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext,
+    user: User, session: AsyncSession,
+) -> None:
+    data = await state.get_data()
+    await _show_students(
+        cq, session, user, callback_data.page, data.get("query"),
+        mode=callback_data.mode,
+    )
+
+
+@router.callback_query(StudentCB.filter(F.action == "search"))
+async def students_search(
+    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext
+) -> None:
+    await state.set_state(PlanFlow.search_student)
+    await state.update_data(mode=callback_data.mode)
+    back = "students" if callback_data.mode == "card" else "new"
+    await _safe_edit(cq, T.SEARCH_PROMPT, kb.back_only(back))
+    await cq.answer()
+
+
+@router.message(PlanFlow.search_student, F.text)
+async def students_search_input(
+    message: Message, state: FSMContext, user: User, session: AsyncSession
+) -> None:
+    query = message.text.strip()
+    data = await state.get_data()
+    mode = data.get("mode", "pick")
+    await state.update_data(query=query)
+    await state.set_state(PlanFlow.select_student)
+    manager = PlanManager(session)
+    size = settings.students_page_size
+    students, total = await _list_students(manager, user, query, 0, size)
+    if not students:
+        await message.answer(
+            "نتیجه‌ای پیدا نشد.",
+            reply_markup=kb.back_only("students" if mode == "card" else "new"),
+        )
+        return
+    title = T.STUDENTS_TITLE if mode == "card" else T.CHOOSE_STUDENT
+    await message.answer(
+        title.format(count=to_fa_digits(str(total))),
+        reply_markup=kb.students_list(students, 0, total, size, mode=mode),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(StudentCB.filter(F.action == "pick"))
+async def student_picked(
+    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext,
+    user: User, session: AsyncSession,
+) -> None:
+    manager = PlanManager(session)
+    student = await manager.ensure_owns_student(user, callback_data.student_id)
+    await state.set_state(PlanFlow.select_week)
+    await state.update_data(student_id=student.id, student_name=student.full_name)
+    await cq.message.edit_text(
+        T.CHOOSE_WEEK.format(student=student.full_name),
+        reply_markup=kb.week_choices(student.id, saturday_of(today_local())),
+        parse_mode="HTML",
+    )
+    await cq.answer()
+
+
+@router.callback_query(WeekCB.filter(F.action == "pick"))
+async def week_picked(
+    cq: CallbackQuery, callback_data: WeekCB, state: FSMContext,
+    user: User, session: AsyncSession,
+) -> None:
+    start = saturday_of(today_local()) + timedelta(days=7 * callback_data.offset)
+    await _open_or_create(cq, state, user, session, callback_data.student_id, start)
+
+
+@router.callback_query(WeekCB.filter(F.action == "custom"))
+async def week_custom(
+    cq: CallbackQuery, callback_data: WeekCB, state: FSMContext
+) -> None:
+    """Custom mode asks for a real range, not a single date."""
+    await state.set_state(PlanFlow.range_start)
+    await state.update_data(student_id=callback_data.student_id, range_start=None)
+    await _safe_edit(cq, T.RANGE_START_PROMPT, kb.back_only("new"))
+    await cq.answer()
+
+
+@router.message(PlanFlow.range_start, F.text)
+async def range_start_input(
+    message: Message, state: FSMContext, user: User, session: AsyncSession
+) -> None:
+    raw = message.text.strip()
+    if raw.startswith("/"):
+        return
+    # both dates in one message is allowed
+    if any(sep in raw for sep in ("تا", "-", "،")):
+        try:
+            start, end = JalaliDate.parse_range(raw)
+            JalaliDate.validate_range(start, end)
+        except DateRangeError as exc:
+            await message.answer(T.INVALID_DATE.format(reason=exc), parse_mode="HTML")
+            return
+        await _show_range_summary(message, state, start, end)
+        return
+
+    try:
+        start = JalaliDate.parse(raw)
+    except DateRangeError as exc:
+        await message.answer(T.INVALID_DATE.format(reason=exc), parse_mode="HTML")
+        return
+    await state.set_state(PlanFlow.range_end)
+    await state.update_data(range_start=start.isoformat())
+    await message.answer(
+        T.RANGE_END_PROMPT.format(start=f"{JalaliDate.weekday_fa(start)} {JalaliDate.long(start)}"),
+        parse_mode="HTML",
+    )
+
+
+@router.message(PlanFlow.range_end, F.text)
+async def range_end_input(
+    message: Message, state: FSMContext, user: User, session: AsyncSession
+) -> None:
+    raw = message.text.strip()
+    if raw.startswith("/"):
+        return
+    data = await state.get_data()
+    start = date.fromisoformat(data["range_start"])
+    try:
+        end = JalaliDate.parse(raw)
+        JalaliDate.validate_range(start, end)
+    except DateRangeError as exc:
+        await message.answer(T.INVALID_DATE.format(reason=exc), parse_mode="HTML")
+        return
+    await _show_range_summary(message, state, start, end)
+
+
+async def _show_range_summary(message: Message, state: FSMContext, start, end) -> None:
+    """Show every real day of the range before anything is created."""
+    days = JalaliDate.range(start, end)
+    data = await state.get_data()
+    listing = "\n".join(
+        f"{to_fa_digits(str(d.index))}. {d.weekday_fa} — {d.short}" for d in days
+    )
+    await state.update_data(range_start=start.isoformat(), range_end=end.isoformat())
+    student_name = data.get("student_name") or ""
+    await message.answer(
+        T.RANGE_SUMMARY.format(
+            student=student_name or "—",
+            start=f"{JalaliDate.weekday_fa(start)} {JalaliDate.long(start)}",
+            end=f"{JalaliDate.weekday_fa(end)} {JalaliDate.long(end)}",
+            count=to_fa_digits(str(len(days))),
+            days=listing,
+        ),
+        reply_markup=kb.range_summary(int(data.get("student_id", 0))),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(WeekCB.filter(F.action == "confirm"))
+async def range_confirm(
+    cq: CallbackQuery, callback_data: WeekCB, state: FSMContext,
+    user: User, session: AsyncSession,
+) -> None:
+    data = await state.get_data()
+    start = date.fromisoformat(data["range_start"])
+    end = date.fromisoformat(data["range_end"])
+    await _open_or_create(
+        cq, state, user, session, callback_data.student_id or int(data["student_id"]),
+        start, end,
+    )
+
+
+async def _open_or_create(
+    cq: CallbackQuery, state: FSMContext, user: User, session: AsyncSession,
+    student_id: int, start: date, end: date | None = None,
+) -> None:
+    manager = PlanManager(session)
+    plan = await manager.create_plan(user, student_id, start, end)
+    await state.set_state(PlanFlow.edit_day)
+    await state.update_data(plan_id=plan.id, student_id=student_id)
+    await cq.message.edit_text(
+        _overview_text(plan, manager),
+        reply_markup=kb.days_overview(plan.id, PlanManager.to_domain(plan)),
+        parse_mode="HTML",
+    )
+    await cq.answer()
+
+
+@router.callback_query(StudentCB.filter(F.action == "page"))
+async def students_page(
+    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext,
+    user: User, session: AsyncSession,
+) -> None:
+    data = await state.get_data()
+    await _show_students(
+        cq, session, user, callback_data.page, data.get("query"),
+        mode=callback_data.mode,
+    )
+
+
+@router.callback_query(StudentCB.filter(F.action == "search"))
+async def students_search(
+    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext
+) -> None:
+    await state.set_state(PlanFlow.search_student)
+    await state.update_data(mode=callback_data.mode)
+    back = "students" if callback_data.mode == "card" else "new"
+    await _safe_edit(cq, T.SEARCH_PROMPT, kb.back_only(back))
+    await cq.answer()
+
+
+@router.message(PlanFlow.search_student, F.text)
+async def students_search_input(
+    message: Message, state: FSMContext, user: User, session: AsyncSession
+) -> None:
+    query = message.text.strip()
+    data = await state.get_data()
+    mode = data.get("mode", "pick")
+    await state.update_data(query=query)
+    await state.set_state(PlanFlow.select_student)
+    manager = PlanManager(session)
+    size = settings.students_page_size
+    students, total = await _list_students(manager, user, query, 0, size)
+    if not students:
+        await message.answer(
+            "نتیجه‌ای پیدا نشد.",
+            reply_markup=kb.back_only("students" if mode == "card" else "new"),
+        )
+        return
+    title = T.STUDENTS_TITLE if mode == "card" else T.CHOOSE_STUDENT
+    await message.answer(
+        title.format(count=to_fa_digits(str(total))),
+        reply_markup=kb.students_list(students, 0, total, size, mode=mode),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(StudentCB.filter(F.action == "pick"))
+async def student_picked(
+    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext,
+    user: User, session: AsyncSession,
+) -> None:
+    manager = PlanManager(session)
+    student = await manager.ensure_owns_student(user, callback_data.student_id)
+    await state.set_state(PlanFlow.select_week)
+    await state.update_data(student_id=student.id, student_name=student.full_name)
+    await cq.message.edit_text(
+        T.CHOOSE_WEEK.format(student=student.full_name),
+        reply_markup=kb.week_choices(student.id, saturday_of(today_local())),
+        parse_mode="HTML",
+    )
+    await cq.answer()
+
+
+@router.callback_query(WeekCB.filter(F.action == "pick"))
+async def week_picked(
+    cq: CallbackQuery, callback_data: WeekCB, state: FSMContext,
+    user: User, session: AsyncSession,
+) -> None:
+    start = saturday_of(today_local()) + timedelta(days=7 * callback_data.offset)
+    await _open_or_create(cq, state, user, session, callback_data.student_id, start)
+
+
+@router.callback_query(WeekCB.filter(F.action == "custom"))
+async def week_custom(cq: CallbackQuery, callback_data: WeekCB, state: FSMContext) -> None:
+    await state.set_state(PlanFlow.custom_week)
+    await state.update_data(student_id=callback_data.student_id)
+    await cq.message.edit_text(
+        T.CUSTOM_WEEK_PROMPT, reply_markup=kb.back_only("new"), parse_mode="HTML"
+    )
+    await cq.answer()
+
+
+@router.message(PlanFlow.custom_week, F.text)
+async def week_custom_input(
+    message: Message, state: FSMContext, user: User, session: AsyncSession
+) -> None:
+    data = await state.get_data()
+    try:
+        start = parse_jalali(message.text)
+    except ValueError:
+        await message.answer(T.INVALID_DATE, parse_mode="HTML")
+        return
+    manager = PlanManager(session)
+    plan = await manager.create_plan(user, int(data["student_id"]), start)
+    await state.set_state(PlanFlow.edit_day)
+    await state.update_data(plan_id=plan.id)
+    await message.answer(
+        _overview_text(plan, manager),
+        reply_markup=kb.days_overview(plan.id, PlanManager.to_domain(plan)),
+        parse_mode="HTML",
+    )
+
+
+def _connection_state(student: User) -> tuple[str, bool]:
+    """(label, has_active_link) — derived from the real invite fields."""
+    if student.telegram_id:
+        return T.CONNECTION_STATE_LINKED, False
+    if not student.invite_token:
+        return T.CONNECTION_STATE_NONE, False
+    expires = student.invite_expires_at
+    if expires is not None:
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=JalaliDate.now().tzinfo)
+        if expires < JalaliDate.now():
+            return T.CONNECTION_STATE_EXPIRED, False
+    return T.CONNECTION_STATE_ISSUED, True
+
+
+async def _connection_block(bot, student: User) -> tuple[str, str | None]:
+    """Text block for the student card plus the usable invite link (if any)."""
+    label, active = _connection_state(student)
+    block = T.CONNECTION_BLOCK.format(status=label)
+    if student.telegram_id:
+        block += f"🆔 <code>{student.telegram_id}</code>\n"
+        return block, None
+    if not active:
+        return block, None
+
+    link = await _invite_link(bot, student.invite_token)
+    dates = ""
+    if student.invite_issued_at and student.invite_expires_at:
+        dates = T.CONNECTION_LINK_DATES.format(
+            issued=JalaliDate.long(student.invite_issued_at.date()),
+            expires=JalaliDate.long(student.invite_expires_at.date()),
+        )
+    return block + T.CONNECTION_LINK_BLOCK.format(link=link, dates=dates), link
+
+
+async def _render_student_card(cq: CallbackQuery, manager: PlanManager, student: User) -> None:
+    """Single source for the student profile screen (always fresh)."""
+    plans = await manager.plans.count_history(student_id=student.id)
+    connection, link = await _connection_block(cq.bot, student)
+    grade_line = f"📚 {student.grade}\n" if student.grade else ""
+    await _safe_edit(
+        cq,
+        T.STUDENT_CARD.format(
+            name=student.full_name,
+            grade_line=grade_line,
+            status=connection,
+            plans=to_fa_digits(str(plans)),
+        ),
+        kb.student_card(student, invite_link=link),
+    )
+
+
 @router.callback_query(StudentCB.filter(F.action == "card"))
 async def student_card(
     cq: CallbackQuery, callback_data: StudentCB, user: User, session: AsyncSession
 ) -> None:
     manager = PlanManager(session)
     student = await manager.get_student(user, callback_data.student_id)
-    plans = await manager.plans.count_history(student_id=student.id)
-    grade_line = f"📚 {student.grade}\n" if student.grade else ""
-    status = (
-        T.STUDENT_STATUS_CONNECTED if student.telegram_id else T.STUDENT_STATUS_PENDING
+    await _render_student_card(cq, manager, student)
+    await cq.answer()
+
+
+@router.callback_query(StudentCB.filter(F.action == "copylink"))
+async def student_copy_link(
+    cq: CallbackQuery, callback_data: StudentCB, user: User, session: AsyncSession
+) -> None:
+    """Telegram cannot copy for us — send the link alone so one tap copies it."""
+    manager = PlanManager(session)
+    student = await manager.get_student(user, callback_data.student_id)
+    if student.telegram_id or not student.invite_token:
+        await cq.answer("لینک فعالی وجود ندارد.", show_alert=True)
+        return
+    link = await _invite_link(cq.bot, student.invite_token)
+    await cq.message.answer(
+        T.INVITE_COPY_HINT.format(link=link),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
     )
-    await _safe_edit(
-        cq,
-        T.STUDENT_CARD.format(
-            name=student.full_name,
-            grade_line=grade_line,
-            status=status,
-            plans=to_fa_digits(str(plans)),
-        ),
-        kb.student_card(student),
+    await cq.answer("✅ لینک آماده کپی است.")
+
+
+@router.callback_query(StudentCB.filter(F.action == "sharelink"))
+async def student_share_link(
+    cq: CallbackQuery, callback_data: StudentCB, user: User, session: AsyncSession
+) -> None:
+    """A forwardable message the advisor can pass straight to the student."""
+    manager = PlanManager(session)
+    student = await manager.get_student(user, callback_data.student_id)
+    if student.telegram_id or not student.invite_token:
+        await cq.answer("لینک فعالی وجود ندارد.", show_alert=True)
+        return
+    link = await _invite_link(cq.bot, student.invite_token)
+    await cq.message.answer(
+        T.INVITE_SHARE.format(name=student.full_name, link=link),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
     )
     await cq.answer()
+
+
+@router.callback_query(StudentCB.filter(F.action == "ask_invite"))
+async def student_ask_new_invite(
+    cq: CallbackQuery, callback_data: StudentCB, user: User, session: AsyncSession
+) -> None:
+    """Warn before invalidating a link that still works."""
+    manager = PlanManager(session)
+    student = await manager.get_student(user, callback_data.student_id)
+    await _safe_edit(
+        cq,
+        T.INVITE_REGENERATE_WARNING.format(name=student.full_name),
+        kb.confirm_new_invite(student.id),
+    )
+    await cq.answer()
+
+
+@router.callback_query(StudentCB.filter(F.action == "unlink"))
+async def student_unlink(
+    cq: CallbackQuery, callback_data: StudentCB, user: User, session: AsyncSession,
+    queue: RenderQueue,
+) -> None:
+    from ...services.deletion import DeletionService
+
+    service = DeletionService(session, queue.service.storage_root)
+    manager = PlanManager(session)
+    student = await manager.get_student(user, callback_data.student_id)
+    if not is_admin(user, cq.from_user.id if cq.from_user else None):
+        await cq.answer("قطع اتصال فقط توسط مدیر انجام می‌شود.", show_alert=True)
+        return
+    student = await service.unlink_telegram(user, student.id)
+    await cq.answer(T.ADMIN_UNLINKED.format(name=student.full_name), show_alert=True)
+    await _render_student_card(cq, manager, student)
 
 
 @router.callback_query(StudentCB.filter(F.action == "connect"))
@@ -248,12 +682,14 @@ async def student_invite(
     link = await _invite_link(cq.bot, token)
     await cq.message.answer(
         T.INVITE_READY.format(
-            name=student.full_name, link=link, expires=jalali_short(expires.date())
+            name=student.full_name, link=link,
+            expires=JalaliDate.long(expires.date()),
         ),
         reply_markup=kb.invite_ready(student),
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
+    await _render_student_card(cq, manager, student)   # refresh in place
     await cq.answer()
 
 
@@ -265,13 +701,7 @@ async def student_revoke_invite(
     await manager.revoke_invite(user, callback_data.student_id)
     student = await manager.get_student(user, callback_data.student_id)
     await cq.answer(T.INVITE_REVOKED, show_alert=True)
-    await _safe_edit(
-        cq,
-        T.CONNECT_MENU.format(
-            name=student.full_name, status=T.STUDENT_STATUS_PENDING
-        ),
-        kb.connect_menu(student),
-    )
+    await _render_student_card(cq, manager, student)
 
 
 @router.callback_query(StudentCB.filter(F.action == "setid"))
@@ -377,162 +807,71 @@ async def student_this_week(
 
 @router.callback_query(StudentCB.filter(F.action == "ask_del"))
 async def student_ask_delete(
-    cq: CallbackQuery, callback_data: StudentCB, user: User, session: AsyncSession
+    cq: CallbackQuery, callback_data: StudentCB, user: User, session: AsyncSession,
+    queue: RenderQueue,
 ) -> None:
-    manager = PlanManager(session)
-    student = await manager.get_student(user, callback_data.student_id)
+    """Step 1 — show exactly what will be destroyed."""
+    service = DeletionService(session, queue.service.storage_root)
+    report = await service.preview_student(user, callback_data.student_id)
+    impact = _impact_lines(report)
     await _safe_edit(
         cq,
-        T.CONFIRM_REMOVE_STUDENT.format(name=student.full_name),
-        kb.confirm_remove_student(student.id),
+        T.CONFIRM_REMOVE_STUDENT.format(name=report.name, impact=impact),
+        kb.confirm_remove_student(callback_data.student_id),
     )
     await cq.answer()
+
+
+@router.callback_query(StudentCB.filter(F.action == "del_confirm"))
+async def student_confirm_delete(
+    cq: CallbackQuery, callback_data: StudentCB, user: User, session: AsyncSession,
+    queue: RenderQueue,
+) -> None:
+    """Step 2 — the irreversible button."""
+    service = DeletionService(session, queue.service.storage_root)
+    report = await service.preview_student(user, callback_data.student_id)
+    await _safe_edit(
+        cq,
+        T.CONFIRM_REMOVE_STUDENT_FINAL.format(name=report.name),
+        kb.confirm_remove_student(callback_data.student_id, final=True),
+    )
+    await cq.answer()
+
+
+def _impact_lines(report) -> str:
+    lines = ["• اتصال دانش‌آموز به مشاور"]
+    if report.plans:
+        lines.append(f"• {to_fa_digits(str(report.plans))} برنامه هفتگی")
+    if report.drafts:
+        lines.append(f"• {to_fa_digits(str(report.drafts))} پیش‌نویس")
+    if report.versions:
+        lines.append(f"• {to_fa_digits(str(report.versions))} نسخه ثبت‌شده")
+    if report.files:
+        lines.append(f"• {to_fa_digits(str(report.files))} فایل تصویر و PDF")
+    lines.append("• دعوت‌های فعال و حساب دانش‌آموز")
+    return "\n".join(lines)
 
 
 @router.callback_query(StudentCB.filter(F.action == "del"))
 async def student_delete(
     cq: CallbackQuery, callback_data: StudentCB, state: FSMContext,
-    user: User, session: AsyncSession,
+    user: User, session: AsyncSession, queue: RenderQueue,
 ) -> None:
-    manager = PlanManager(session)
-    await manager.remove_student(user, callback_data.student_id)
-    await cq.answer(T.STUDENT_REMOVED, show_alert=True)
+    """Real deletion — success is reported only after the transaction holds."""
+    service = DeletionService(session, queue.service.storage_root)
+    try:
+        report = await service.delete_student(user, callback_data.student_id)
+        await session.commit()
+    except (AccessDenied, StudentError):
+        raise
+    except Exception:
+        log.exception("student delete failed for %s", callback_data.student_id)
+        await cq.answer(T.STUDENT_REMOVE_FAILED, show_alert=True)
+        return
+
+    await cq.answer(T.STUDENT_REMOVED.format(name=report.name), show_alert=True)
     await state.update_data(query=None, mode="card")
     await _show_students(cq, session, user, page=0, query=None, mode="card")
-
-
-@router.callback_query(StudentCB.filter(F.action == "page"))
-async def students_page(
-    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext,
-    user: User, session: AsyncSession,
-) -> None:
-    data = await state.get_data()
-    await _show_students(
-        cq, session, user, callback_data.page, data.get("query"),
-        mode=callback_data.mode,
-    )
-
-
-@router.callback_query(StudentCB.filter(F.action == "search"))
-async def students_search(
-    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext
-) -> None:
-    await state.set_state(PlanFlow.search_student)
-    await state.update_data(mode=callback_data.mode)
-    back = "students" if callback_data.mode == "card" else "new"
-    await _safe_edit(cq, T.SEARCH_PROMPT, kb.back_only(back))
-    await cq.answer()
-
-
-@router.message(PlanFlow.search_student, F.text)
-async def students_search_input(
-    message: Message, state: FSMContext, user: User, session: AsyncSession
-) -> None:
-    query = message.text.strip()
-    data = await state.get_data()
-    mode = data.get("mode", "pick")
-    await state.update_data(query=query)
-    await state.set_state(PlanFlow.select_student)
-    manager = PlanManager(session)
-    size = settings.students_page_size
-    students, total = await _list_students(manager, user, query, 0, size)
-    if not students:
-        await message.answer(
-            "نتیجه‌ای پیدا نشد.",
-            reply_markup=kb.back_only("students" if mode == "card" else "new"),
-        )
-        return
-    title = T.STUDENTS_TITLE if mode == "card" else T.CHOOSE_STUDENT
-    await message.answer(
-        title.format(count=to_fa_digits(str(total))),
-        reply_markup=kb.students_list(students, 0, total, size, mode=mode),
-        parse_mode="HTML",
-    )
-
-
-@router.callback_query(StudentCB.filter(F.action == "pick"))
-async def student_picked(
-    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext,
-    user: User, session: AsyncSession,
-) -> None:
-    manager = PlanManager(session)
-    student = await manager.ensure_owns_student(user, callback_data.student_id)
-    await state.set_state(PlanFlow.select_week)
-    await state.update_data(student_id=student.id)
-    await cq.message.edit_text(
-        T.CHOOSE_WEEK.format(student=student.full_name),
-        reply_markup=kb.week_choices(student.id, saturday_of(today_local())),
-        parse_mode="HTML",
-    )
-    await cq.answer()
-
-
-@router.callback_query(WeekCB.filter(F.action == "pick"))
-async def week_picked(
-    cq: CallbackQuery, callback_data: WeekCB, state: FSMContext,
-    user: User, session: AsyncSession,
-) -> None:
-    start = saturday_of(today_local()) + timedelta(days=7 * callback_data.offset)
-    await _open_or_create(cq, state, user, session, callback_data.student_id, start)
-
-
-@router.callback_query(WeekCB.filter(F.action == "custom"))
-async def week_custom(cq: CallbackQuery, callback_data: WeekCB, state: FSMContext) -> None:
-    await state.set_state(PlanFlow.custom_week)
-    await state.update_data(student_id=callback_data.student_id)
-    await cq.message.edit_text(
-        T.CUSTOM_WEEK_PROMPT, reply_markup=kb.back_only("new"), parse_mode="HTML"
-    )
-    await cq.answer()
-
-
-@router.message(PlanFlow.custom_week, F.text)
-async def week_custom_input(
-    message: Message, state: FSMContext, user: User, session: AsyncSession
-) -> None:
-    data = await state.get_data()
-    try:
-        start = parse_jalali(message.text)
-    except ValueError:
-        await message.answer(T.INVALID_DATE, parse_mode="HTML")
-        return
-    manager = PlanManager(session)
-    plan = await manager.create_plan(user, int(data["student_id"]), start)
-    await state.set_state(PlanFlow.edit_day)
-    await state.update_data(plan_id=plan.id)
-    await message.answer(
-        _overview_text(plan, manager),
-        reply_markup=kb.days_overview(plan.id, PlanManager.to_domain(plan)),
-        parse_mode="HTML",
-    )
-
-
-async def _open_or_create(
-    cq: CallbackQuery, state: FSMContext, user: User, session: AsyncSession,
-    student_id: int, start: date,
-) -> None:
-    manager = PlanManager(session)
-    plan = await manager.create_plan(user, student_id, start)
-    await state.set_state(PlanFlow.edit_day)
-    await state.update_data(plan_id=plan.id, student_id=student_id)
-    await cq.message.edit_text(
-        _overview_text(plan, manager),
-        reply_markup=kb.days_overview(plan.id, PlanManager.to_domain(plan)),
-        parse_mode="HTML",
-    )
-    await cq.answer()
-
-
-def _overview_text(plan: WeeklyPlanDB, manager: PlanManager) -> str:
-    domain = manager.to_domain(plan)
-    return (
-        f"<b>{T.HEADER}</b>\n\n"
-        f"{kb.plan_header(plan)}\n\n"
-        f"📚 فعالیت‌ها: {to_fa_digits(str(domain.activity_count))}"
-        f" · 📝 تکالیف: {to_fa_digits(str(len(domain.assignments)))}\n"
-        f"🧩 نسخه {to_fa_digits(str(plan.version))}\n\n"
-        "روز مورد نظر را انتخاب کنید:"
-    )
 
 
 # ------------------------------------------------------------- day/slots ----
@@ -592,10 +931,16 @@ async def clear_day(
 
 
 @router.callback_query(DayCB.filter(F.action == "copy"))
-async def copy_day_prompt(cq: CallbackQuery, callback_data: DayCB) -> None:
-    await cq.message.edit_text(
+async def copy_day_prompt(
+    cq: CallbackQuery, callback_data: DayCB, user: User, session: AsyncSession
+) -> None:
+    manager = PlanManager(session)
+    plan = await manager.get_editable(user, callback_data.plan_id)
+    await _safe_edit(
+        cq,
         f"کپی برنامهٔ «{T.day_fa(callback_data.day)}» به کدام روز؟",
-        reply_markup=kb.copy_day_targets(callback_data.plan_id, callback_data.day),
+        kb.copy_day_targets(callback_data.plan_id, callback_data.day,
+                            PlanManager.to_domain(plan)),
     )
     await cq.answer()
 

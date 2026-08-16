@@ -97,14 +97,23 @@ def test_copy_day_and_duplicate_week():
     plan.copy_day("saturday", "monday")
     assert plan.day("monday").slot(0).subject == "زیست"
 
+    # a calendar week snaps to the real Saturday of the target week
     new_start = jalali_to_gregorian(1405, 6, 1)
     clone = plan.duplicate(new_start)
-    assert clone.week_start == new_start
+    assert clone.week_start == saturday_of(new_start)
+    assert clone.is_calendar_week
     assert clone.day("monday").slot(0).subject == "زیست"
     assert clone.id != plan.id
     # deep copy: editing the clone must not touch the original
     clone.day("monday").slot(0).subject = "شیمی"
     assert plan.day("monday").slot(0).subject == "زیست"
+
+    # a custom range keeps its own length and starts exactly where asked
+    custom = WeeklyPlan(student_name="س", student_id="1")
+    custom.apply_range(jalali_to_gregorian(1405, 5, 26), jalali_to_gregorian(1405, 5, 29))
+    moved = custom.duplicate(jalali_to_gregorian(1405, 6, 2))
+    assert moved.week_start == jalali_to_gregorian(1405, 6, 2)
+    assert moved.day_count == 4 and not moved.is_calendar_week
 
 
 def test_serialization_roundtrip():

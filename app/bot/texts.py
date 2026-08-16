@@ -83,108 +83,264 @@ ADMIN_MENU = (
     "╭────────────────────────────╮\n"
     "  🛠 <b>پنل مدیریت رتبه لند</b>\n"
     "╰────────────────────────────╯\n\n"
-    "نسخه {version} · {env}"
+    "نسخه {version} · محیط: {env}\n"
+    "👥 مشاوران: {advisors} · 👨‍🎓 دانش‌آموزان: {students} · 📋 برنامه‌ها: {plans}"
 )
 ADMIN_ONLY = "⛔️ این بخش فقط برای مدیر سیستم است."
-ADMIN_ADVISORS = "👥 <b>مشاوران</b> ({count})"
+ADMIN_ADVISORS = "👥 <b>مدیریت مشاوران</b> — {count} مشاور"
 ADMIN_NO_ADVISORS = (
-    "👥 <b>مشاوران</b>\n\nهنوز مشاوری ثبت نشده است.\n"
-    "با دستور زیر اضافه کنید:\n"
+    "👥 <b>مدیریت مشاوران</b>\n\nهنوز مشاوری ثبت نشده است.\n"
+    "افزودن مشاور با دستور مدیریتی زیر انجام می‌شود:\n"
     "<code>python -m tools.manage add-advisor \"نام\" --telegram-id &lt;ID&gt;</code>"
 )
 ADMIN_ADVISOR_CARD = (
-    "👤 <b>{name}</b>\n"
-    "{status_line}"
-    "🆔 <code>{telegram}</code>\n"
-    "👨‍🎓 دانش‌آموزان: {students}\n"
-    "📅 برنامه‌ها: {plans} (این هفته: {this_week})\n"
-    "🕐 آخرین فعالیت: {last_seen}"
-)
-ADMIN_STUDENTS = "👨‍🎓 <b>دانش‌آموزان</b> ({count})"
-ADMIN_STUDENT_CARD = (
-    "👤 <b>{name}</b>\n"
-    "{grade_line}"
+    "👨‍🏫 <b>مشاور: {name}</b>\n\n"
     "وضعیت: {status}\n"
-    "مشاور: {advisor}\n"
+    "شناسه تلگرام: <code>{telegram}</code>\n\n"
+    "👨‍🎓 دانش‌آموزان: {students}\n"
     "📅 برنامه‌ها: {plans}\n"
-    "🗓 ثبت: {created}"
+    "📝 پیش‌نویس‌ها: {drafts}\n"
+    "📤 ارسال‌شده: {sent}\n"
+    "🗓 برنامه‌های این هفته: {this_week}\n\n"
+    "آخرین فعالیت: {last_seen}"
+)
+ADMIN_STUDENTS = "👨‍🎓 <b>مدیریت دانش‌آموزان</b> — {count} دانش‌آموز"
+ADMIN_NO_STUDENTS = "👨‍🎓 <b>مدیریت دانش‌آموزان</b>\n\nهنوز دانش‌آموزی ثبت نشده است."
+ADMIN_STUDENT_CARD = (
+    "👨‍🎓 <b>دانش‌آموز: {name}</b>\n\n"
+    "{grade_line}"
+    "وضعیت حساب: {status}\n"
+    "اتصال تلگرام: {connection}\n"
+    "شناسه تلگرام: <code>{telegram}</code>\n"
+    "مشاور: {advisor}\n\n"
+    "📅 برنامه‌ها: {plans}\n"
+    "📝 پیش‌نویس‌ها: {drafts}\n"
+    "🗓 تاریخ ثبت: {created}\n"
+    "آخرین فعالیت: {last_seen}"
 )
 ADMIN_SYSTEM = (
-    "📊 <b>وضعیت سیستم</b>\n\n"
-    "🤖 ربات        {bot}\n"
-    "🗄 PostgreSQL  {db}\n"
-    "⚡ Redis        {redis}\n"
-    "🎨 Renderer    {renderer}\n"
-    "🌐 Chromium    {chromium}\n"
-    "🔤 libraqm     {raqm}\n"
-    "💾 Storage     {storage}\n"
-    "❤️ Health      {health}\n\n"
-    "⏱ تأخیر دیتابیس: {db_latency}\n"
-    "🧵 رندرهای در جریان: {inflight}\n"
-    "⏳ آپ‌تایم: {uptime}"
+    "❤️ <b>سلامت سیستم</b>\n\n"
+    "🤖 ربات: {bot}\n"
+    "🗄 پایگاه داده: {db}\n"
+    "⚡ حافظه موقت: {redis}\n"
+    "🎨 موتور رندر: {renderer}\n"
+    "🌐 مرورگر رندر: {chromium}\n"
+    "🔤 پشتیبانی فارسی: {raqm}\n"
+    "💾 فضای ذخیره‌سازی: {storage}\n\n"
+    "⏱ زمان پاسخ پایگاه داده: {db_latency}\n"
+    "🧵 تولیدهای در جریان: {inflight}\n"
+    "⏳ مدت فعالیت: {uptime}"
 )
 ADMIN_BOT = (
     "🤖 <b>وضعیت ربات</b>\n\n"
     "وضعیت: {status}\n"
-    "حالت: {mode}\n"
-    "آپ‌تایم: {uptime}\n"
+    "روش اتصال: {mode}\n"
+    "مدت فعالیت: {uptime}\n"
     "نسخه: {version}\n"
-    "قالب: {template}\n"
-    "رندرر: {renderer}\n"
-    "Fallback: {fallback}\n"
-    "آخرین راه‌اندازی: {started}"
+    "نسخه قالب: {template}\n"
+    "موتور رندر: {renderer}\n"
+    "پشتیبان رندر: {fallback}"
 )
 ADMIN_DB = (
-    "🗄 <b>دیتابیس</b>\n\n"
-    "PostgreSQL {status}\n\n"
+    "🗄 <b>مدیریت پایگاه داده</b>\n\n"
+    "وضعیت اتصال: {status}\n\n"
     "👥 کاربران: {users}\n"
     "🧑‍🏫 مشاوران: {advisors}\n"
     "👨‍🎓 دانش‌آموزان: {students}\n"
     "📋 برنامه‌ها: {plans}\n"
     "📝 پیش‌نویس‌ها: {drafts}\n"
-    "🗂 فایل‌های ثبت‌شده: {files}\n\n"
-    "⏱ تأخیر: {latency}"
+    "🗂 نسخه‌های ثبت‌شده: {files}\n"
+    "🧩 فعالیت‌های ثبت‌شده: {activities}\n\n"
+    "⏱ زمان پاسخ: {latency}"
 )
 ADMIN_STORAGE = (
-    "📁 <b>فایل‌ها و Storage</b>\n\n"
-    "مسیر: <code>{path}</code>\n"
-    "Volume: {mounted}\n\n"
-    "🖼 PNG: {png}\n"
-    "📄 PDF: {pdf}\n"
+    "📁 <b>مدیریت فایل‌ها</b>\n\n"
+    "مسیر ذخیره‌سازی:\n<code>{path}</code>\n"
+    "وضعیت فضا: {mounted}\n\n"
+    "🖼 تصویر (PNG): {png}\n"
+    "📄 پی‌دی‌اف (PDF): {pdf}\n"
     "📦 مجموع: {total} فایل · {size}\n"
-    "🗑 فایل‌های یتیم: {orphans}"
+    "🗑 فایل‌های بدون رکورد: {orphans}"
 )
 ADMIN_STATS = (
-    "📈 <b>آمار</b>\n\n"
+    "📊 <b>آمار و گزارش‌ها</b>\n\n"
     "👥 مشاوران: {advisors}\n"
     "👨‍🎓 دانش‌آموزان: {students}\n"
     "📋 برنامه‌ها: {plans}\n"
     "📝 پیش‌نویس‌ها: {drafts}\n"
     "📤 ارسال‌شده: {sent}\n"
     "🎨 تولیدشده: {generated}\n\n"
-    "<b>بازه‌ها</b>\n"
+    "<b>بازه‌های زمانی</b>\n"
     "امروز: {today}\n"
     "این هفته: {week}\n"
     "این ماه: {month}\n"
-    "کل: {all_time}"
+    "از ابتدا: {all_time}\n\n"
+    "🔗 دعوت‌های صادرشده: {invites}\n"
+    "🛡 دعوت‌های مسدودشده: {blocked}"
 )
-ADMIN_AUDIT = "📋 <b>Audit Logs</b> — صفحه {page}"
+ADMIN_AUDIT = "🧾 <b>گزارش فعالیت‌ها</b> — صفحه {page} از {pages}"
 ADMIN_SETTINGS = (
-    "⚙️ <b>تنظیمات</b> (فقط خواندنی — از Environment Variables می‌آید)\n\n"
-    "محیط: {env}\n"
+    "⚙️ <b>تنظیمات مدیریت</b>\n"
+    "<i>این مقادیر از متغیرهای محیطی خوانده می‌شوند</i>\n\n"
+    "محیط اجرا: {env}\n"
     "منطقه زمانی: {tz}\n"
-    "رندرر: {backend}\n"
-    "مقیاس چاپ: {scale} · DPI: {dpi}\n"
-    "هم‌زمانی رندر: {concurrency}\n"
-    "نگه‌داری: {retention}\n"
-    "مدیران: {admins} نفر\n"
-    "Storage: <code>{storage}</code>"
+    "موتور تولید: {backend}\n"
+    "مقیاس چاپ: {scale} · کیفیت: {dpi} نقطه بر اینچ\n"
+    "تعداد تولید هم‌زمان: {concurrency}\n"
+    "مدت نگهداری: {retention}\n"
+    "تعداد مدیران: {admins}\n"
+    "مسیر ذخیره‌سازی:\n<code>{storage}</code>"
 )
+ADMIN_PLANS = "📋 <b>مدیریت برنامه‌ها</b> — {count} برنامه"
+ADMIN_PLAN_CARD = (
+    "📋 <b>برنامه هفتگی</b>\n\n"
+    "👨‍🎓 دانش‌آموز: {student}\n"
+    "👨‍🏫 مشاور: {advisor}\n"
+    "📅 هفته: {week}\n"
+    "وضعیت: {status}\n"
+    "نسخه: {version}\n"
+    "🧩 فعالیت‌ها: {activities} · 📝 تکالیف: {assignments}"
+)
+ADMIN_CONNECTION = (
+    "🔗 <b>مدیریت اتصال</b>\n\n"
+    "دانش‌آموز: <b>{name}</b>\n"
+    "وضعیت: {status}\n"
+    "شناسه تلگرام: <code>{telegram}</code>\n"
+    "لینک دعوت فعال: {invite}"
+)
+ADMIN_TRANSFER_PICK = (
+    "🔄 <b>تغییر مشاور</b>\n\n"
+    "دانش‌آموز: <b>{name}</b>\n"
+    "مشاور فعلی: {current}\n\n"
+    "مشاور جدید را انتخاب کنید:"
+)
+ADMIN_TRANSFER_CONFIRM = (
+    "⚠️ <b>تغییر مشاور</b>\n\n"
+    "دانش‌آموز: <b>{name}</b>\n"
+    "از: {old}\n"
+    "به: <b>{new}</b>\n\n"
+    "تأیید می‌کنید؟"
+)
+ADMIN_TRANSFER_DONE = "✅ مشاور «{name}» به «{new}» تغییر کرد."
+ADMIN_DELETE_ADVISOR = (
+    "⚠️ <b>حذف مشاور</b>\n\n"
+    "مشاور: <b>{name}</b>\n"
+    "👨‍🎓 دانش‌آموزان: {students}\n"
+    "📅 برنامه‌ها: {plans}\n\n"
+    "{note}"
+)
+ADMIN_ADVISOR_HAS_STUDENTS = (
+    "دانش‌آموزان این مشاور چه شوند؟\n"
+    "• <b>انتقال</b>: دانش‌آموزان و برنامه‌ها به مشاور دیگری منتقل می‌شوند.\n"
+    "• <b>بدون مشاور</b>: دانش‌آموزان می‌مانند ولی برنامه‌های این مشاور حذف می‌شود."
+)
+ADMIN_ADVISOR_NO_STUDENTS = "این مشاور دانش‌آموزی ندارد و حذف او بی‌خطر است."
+ADMIN_PICK_TARGET_ADVISOR = "مشاور مقصد برای انتقال دانش‌آموزان را انتخاب کنید:"
+ADMIN_ADVISOR_DELETED = "✅ مشاور «{name}» حذف شد. ({detail})"
+ADMIN_STUDENT_DELETED = "✅ دانش‌آموز «{name}» و همه داده‌هایش حذف شد."
+ADMIN_PLAN_DELETED = "✅ برنامه حذف شد. ({files} فایل پاک شد)"
+ADMIN_DELETE_FAILED = "❌ عملیات حذف انجام نشد. هیچ تغییری ثبت نشد."
+ADMIN_SELF_ACTION = "⚠️ این عملیات روی مدیر اصلی مجاز نیست."
+ADMIN_EDIT_ADVISOR_PROMPT = (
+    "✏️ <b>ویرایش مشاور</b>\n\n"
+    "مقدار فعلی:\n<code>{current}</code>\n\n"
+    "نام جدید را بفرستید (برای تغییر شناسه تلگرام: <code>نام | 123456789</code>)"
+)
+ADMIN_EDIT_STUDENT_PROMPT = (
+    "✏️ <b>ویرایش دانش‌آموز</b>\n\n"
+    "مقدار فعلی:\n<code>{current}</code>\n\n"
+    "مقدار جدید را بفرستید: <code>نام | پایه</code>"
+)
+ADMIN_UPDATED = "✅ اطلاعات «{name}» به‌روزرسانی شد."
+ADMIN_UNLINKED = "🔓 اتصال تلگرام «{name}» قطع شد."
+ADMIN_SEARCH_PROMPT = "🔎 نام یا شناسه تلگرام را بفرستید:"
+ADMIN_SEARCH_EMPTY = "نتیجه‌ای پیدا نشد."
 ADMIN_CONFIRM = "⚠️ آیا مطمئن هستید؟\n\n{what}\n\nاین عملیات قابل بازگشت نیست."
 ADMIN_SUSPENDED = "🔒 حساب «{name}» غیرفعال شد."
 ADMIN_ACTIVATED = "🔓 حساب «{name}» فعال شد."
-ADMIN_CLEANUP_DONE = "🧹 {plans} برنامه و {files} فایل پاک شد."
+ADMIN_CLEANUP_DONE = "🧹 {files} فایل بدون رکورد پاک شد."
 ADMIN_HEALTH_OK = "✅ همه سرویس‌ها سالم هستند."
+
+ADVISOR_PROFILE = (
+    "👨‍🏫 <b>پروفایل من</b>\n\n"
+    "نام: {name}\n"
+    "نقش: {role}\n"
+    "شناسه تلگرام: <code>{telegram}</code>\n"
+    "وضعیت: {status}\n\n"
+    "👨‍🎓 دانش‌آموزان من: {students}\n"
+    "📅 برنامه‌ها: {plans}\n"
+    "📝 پیش‌نویس‌ها: {drafts}\n"
+    "📤 ارسال‌شده: {sent}"
+)
+STUDENT_PROFILE = (
+    "👨‍🎓 <b>پروفایل من</b>\n\n"
+    "نام: {name}\n"
+    "{grade_line}"
+    "مشاور: {advisor}\n"
+    "اتصال تلگرام: {connection}\n\n"
+    "📅 برنامه‌های دریافتی: {plans}\n"
+    "🗓 عضویت: {created}"
+)
+ROLE_FA = {"admin": "مدیر", "advisor": "مشاور", "student": "دانش‌آموز"}
+
+STATUS_ACTIVE = "🟢 فعال"
+STATUS_SUSPENDED = "🔒 غیرفعال"
+STATUS_ONLINE = "🟢 آنلاین"
+STATUS_CONNECTED = "🟢 متصل"
+STATUS_NOT_CONNECTED = "🟡 متصل نشده"
+STATUS_READY = "🟢 آماده"
+STATUS_AVAILABLE = "🟢 در دسترس"
+STATUS_OPTIONAL_OFF = "⚪️ غیرفعال (اختیاری)"
+STATUS_FALLBACK = "⚪️ حالت جایگزین"
+STATUS_MISSING = "🔴 در دسترس نیست"
+MODE_POLLING = "دریافت دوره‌ای پیام‌ها"
+PLAN_STATUS_FA = {
+    "draft": "پیش‌نویس",
+    "ready": "آماده",
+    "generated": "تولیدشده",
+    "sent": "ارسال‌شده",
+    "archived": "بایگانی",
+}
+AUDIT_ACTIONS_FA = {
+    "plan.created": "ایجاد برنامه",
+    "plan.edited": "ویرایش برنامه",
+    "plan.generated": "تولید برنامه",
+    "plan.regenerated": "تولید مجدد برنامه",
+    "plan.sent": "ارسال برنامه",
+    "plan.deleted": "حذف برنامه",
+    "plan.purged": "پاک‌سازی برنامه‌های قدیمی",
+    "student.created": "ایجاد دانش‌آموز",
+    "student.edited": "ویرایش دانش‌آموز",
+    "student.deleted": "حذف دانش‌آموز",
+    "student.detached": "جدا کردن دانش‌آموز از مشاور",
+    "student.advisor_changed": "تغییر مشاور دانش‌آموز",
+    "student.connected": "اتصال دانش‌آموز",
+    "student.linked_manually": "اتصال دستی دانش‌آموز",
+    "student.suspended": "غیرفعال کردن دانش‌آموز",
+    "student.activated": "فعال کردن دانش‌آموز",
+    "student.invite_issued": "صدور لینک دعوت",
+    "student.invite_revoked": "ابطال لینک دعوت",
+    "advisor.created": "ایجاد مشاور",
+    "advisor.edited": "ویرایش مشاور",
+    "advisor.deleted": "حذف مشاور",
+    "advisor.suspended": "تعلیق مشاور",
+    "advisor.activated": "فعال‌سازی مشاور",
+    "invite.opened": "باز شدن لینک دعوت",
+    "invite.accepted": "اتصال دانش‌آموز با لینک",
+    "invite.rejected": "رد لینک دعوت",
+    "invite.expired": "لینک دعوت منقضی",
+    "invite.already_used": "لینک دعوت قبلاً استفاده شده",
+    "invite.already_linked": "دانش‌آموز قبلاً متصل بوده",
+    "invite.role_conflict": "تلاش نامعتبر برای استفاده از لینک دعوت",
+    "telegram.unlinked": "قطع اتصال تلگرام",
+    "storage.cleanup": "پاک‌سازی فایل‌ها",
+}
+
+
+def audit_fa(action: str) -> str:
+    return AUDIT_ACTIONS_FA.get(action, action)
+
+
 ACCOUNT_SUSPENDED = (
     "🔒 حساب شما موقتاً غیرفعال شده است.\n"
     "برای پیگیری با مدیر سیستم تماس بگیرید."
@@ -290,10 +446,21 @@ STUDENT_CARD = (
 )
 STUDENT_STATUS_CONNECTED = "🟢 متصل به ربات"
 STUDENT_STATUS_PENDING = "🟡 در انتظار اتصال (لینک دعوت را بفرستید)"
-STUDENT_REMOVED = "🗑 دانش‌آموز از فهرست شما حذف شد. (برنامه‌های قبلی حذف نشدند)"
+STUDENT_REMOVED = "✅ دانش‌آموز «{name}» و همه داده‌هایش حذف شد."
+STUDENT_REMOVE_FAILED = (
+    "❌ حذف دانش‌آموز انجام نشد.\n\n"
+    "هیچ تغییری ثبت نشد. لطفاً دوباره تلاش کنید."
+)
 CONFIRM_REMOVE_STUDENT = (
-    "حذف <b>{name}</b> از فهرست شما؟\n"
-    "برنامه‌های ساخته‌شده باقی می‌مانند، فقط دیگر در فهرست شما دیده نمی‌شود."
+    "⚠️ <b>حذف دانش‌آموز</b>\n\n"
+    "نام: <b>{name}</b>\n\n"
+    "با این کار موارد زیر برای همیشه حذف می‌شوند:\n"
+    "{impact}\n"
+    "این عملیات قابل بازگشت نیست."
+)
+CONFIRM_REMOVE_STUDENT_FINAL = (
+    "🗑 <b>تأیید نهایی</b>\n\n"
+    "برای حذف قطعی «<b>{name}</b>» دکمه زیر را بزنید."
 )
 STUDENT_WELCOME_LINKED = (
     "🎉 خوش آمدی <b>{name}</b>!\n\n"
@@ -338,11 +505,28 @@ CHOOSE_WEEK = (
     "دانش‌آموز: {student}\n\n"
     "هفته پیش‌فرض از شنبه تا جمعه است."
 )
-CUSTOM_WEEK_PROMPT = (
-    "تاریخ شنبهٔ هفته را به شمسی بنویسید:\n"
-    "<code>1405/05/25</code>"
+RANGE_START_PROMPT = (
+    "📅 <b>انتخاب بازه برنامه</b>\n\n"
+    "<b>تاریخ شروع</b> را بفرستید:\n"
+    "<code>۱۴۰۵/۰۵/۲۶</code>\n\n"
+    "می‌توانید هر دو تاریخ را یکجا هم بفرستید:\n"
+    "<code>۱۴۰۵/۰۵/۲۶ تا ۱۴۰۵/۰۵/۲۹</code>"
 )
-INVALID_DATE = "⚠️ تاریخ نامعتبر است. نمونه درست: <code>1405/05/25</code>"
+RANGE_END_PROMPT = (
+    "🟢 <b>شروع:</b> {start}\n\n"
+    "حالا <b>تاریخ پایان</b> را بفرستید:\n"
+    "<code>۱۴۰۵/۰۵/۲۹</code>\n\n"
+    "<i>برای برنامه یک‌روزه، همان تاریخ شروع را بفرستید.</i>"
+)
+RANGE_SUMMARY = (
+    "📋 <b>خلاصه بازه</b>\n\n"
+    "👨‍🎓 {student}\n\n"
+    "🟢 شروع: {start}\n"
+    "🔵 پایان: {end}\n"
+    "📆 تعداد روز: {count}\n\n"
+    "{days}"
+)
+INVALID_DATE = "⚠️ {reason}"
 
 SLOT_PROMPT = (
     "✏️ <b>فعالیت شماره {slot}</b> — {day}\n\n"
@@ -400,6 +584,31 @@ NO_PREVIOUS_WEEK = "برنامه‌ای برای هفته‌های قبل این
 
 SLOT_EMPTY = "خالی"
 DAY_TITLE = "📅 <b>{day}</b> — {date}\n\nروی هر ردیف بزنید تا ویرایش شود."
+CONNECTION_BLOCK = (
+    "🔗 <b>وضعیت اتصال:</b>\n{status}\n"
+)
+CONNECTION_LINK_BLOCK = (
+    "\n🔗 <b>لینک دعوت:</b>\n<code>{link}</code>\n"
+    "{dates}"
+)
+CONNECTION_STATE_LINKED = "🟢 متصل"
+CONNECTION_STATE_ISSUED = "🟡 لینک دعوت صادر شده (هنوز استفاده نشده)"
+CONNECTION_STATE_EXPIRED = "🔴 لینک دعوت منقضی شده"
+CONNECTION_STATE_NONE = "⚪️ هنوز لینکی صادر نشده"
+CONNECTION_LINK_DATES = "📅 صادر شده: {issued}\n⏳ اعتبار تا: {expires}\n"
+INVITE_REGENERATE_WARNING = (
+    "⚠️ یک لینک فعال برای <b>{name}</b> وجود دارد.\n\n"
+    "با ساخت لینک جدید، لینک قبلی باطل می‌شود.\n"
+    "آیا ادامه می‌دهید؟"
+)
+INVITE_SHARE = (
+    "🔗 لینک اتصال <b>{name}</b>:\n\n"
+    "<code>{link}</code>\n\n"
+    "این پیام را برای دانش‌آموز فوروارد کنید یا لینک را کپی و ارسال کنید."
+)
+INVITE_COPY_HINT = (
+    "📋 لینک زیر را لمس کنید تا کپی شود:\n\n<code>{link}</code>"
+)
 
 
 def day_fa(key: str) -> str:

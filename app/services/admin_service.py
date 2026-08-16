@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -83,28 +83,32 @@ class AdminService:
             .offset(offset)
         )
         rows = list((await self.s.execute(stmt)).scalars())
-        out: list[tuple[User, int, int]] = []
-        for advisor in rows:
-            students = int(
-                (
-                    await self.s.execute(
-                        select(func.count())
-                        .select_from(AdvisorStudent)
-                        .where(AdvisorStudent.advisor_id == advisor.id)
-                    )
-                ).scalar_one()
-            )
-            plans = int(
-                (
-                    await self.s.execute(
-                        select(func.count())
-                        .select_from(WeeklyPlanDB)
-                        .where(WeeklyPlanDB.advisor_id == advisor.id)
-                    )
-                ).scalar_one()
-            )
-            out.append((advisor, students, plans))
-        return out
+        if not rows:
+            return []
+        ids = [a.id for a in rows]
+        # two grouped queries instead of two per advisor (no N+1)
+        student_counts = dict(
+            (
+                await self.s.execute(
+                    select(AdvisorStudent.advisor_id, func.count())
+                    .where(AdvisorStudent.advisor_id.in_(ids))
+                    .group_by(AdvisorStudent.advisor_id)
+                )
+            ).all()
+        )
+        plan_counts = dict(
+            (
+                await self.s.execute(
+                    select(WeeklyPlanDB.advisor_id, func.count())
+                    .where(WeeklyPlanDB.advisor_id.in_(ids))
+                    .group_by(WeeklyPlanDB.advisor_id)
+                )
+            ).all()
+        )
+        return [
+            (a, int(student_counts.get(a.id, 0)), int(plan_counts.get(a.id, 0)))
+            for a in rows
+        ]
 
     async def count_advisors(self) -> int:
         stmt = (
@@ -157,13 +161,85 @@ class AdminService:
                 .limit(1)
             )
         ).scalar_one_or_none()
+        drafts = int(
+            (
+                await self.s.execute(
+                    select(func.count())
+                    .select_from(WeeklyPlanDB)
+                    .where(
+                        WeeklyPlanDB.advisor_id == advisor_id,
+                        WeeklyPlanDB.status == PlanStatusDB.DRAFT,
+                    )
+                )
+            ).scalar_one()
+        )
+        sent = int(
+            (
+                await self.s.execute(
+                    select(func.count())
+                    .select_from(WeeklyPlanDB)
+                    .where(
+                        WeeklyPlanDB.advisor_id == advisor_id,
+                        WeeklyPlanDB.status == PlanStatusDB.SENT,
+                    )
+                )
+            ).scalar_one()
+        )
         return {
             "advisor": advisor,
             "students": students,
             "plans": plans,
+            "drafts": drafts,
+            "sent": sent,
             "this_week": this_week,
             "last_seen": last,
         }
+
+    async def search_advisors(self, query: str, limit: int) -> list[tuple[User, int, int]]:
+        """Search by name or Telegram id."""
+        pattern = f"%{query.strip()}%"
+        clauses = [User.full_name.ilike(pattern)]
+        if query.strip().isdigit():
+            clauses.append(User.telegram_id == int(query.strip()))
+        stmt = (
+            select(User)
+            .where(User.role.in_([Role.ADVISOR, Role.ADMIN]), or_(*clauses))
+            .order_by(User.full_name)
+            .limit(limit)
+        )
+        found = list((await self.s.execute(stmt)).scalars())
+        out = []
+        for advisor in found:
+            detail = await self.advisor_detail(advisor.id)
+            out.append((advisor, detail["students"], detail["plans"]))
+        return out
+
+    async def search_students(self, query: str, limit: int) -> list[User]:
+        pattern = f"%{query.strip()}%"
+        clauses = [User.full_name.ilike(pattern), User.grade.ilike(pattern)]
+        if query.strip().isdigit():
+            clauses.append(User.telegram_id == int(query.strip()))
+        stmt = (
+            select(User)
+            .where(User.role == Role.STUDENT, or_(*clauses))
+            .order_by(User.full_name)
+            .limit(limit)
+        )
+        return list((await self.s.execute(stmt)).scalars())
+
+    async def advisor_candidates(self, exclude: int = 0) -> list[User]:
+        """Advisors available as a transfer target."""
+        stmt = (
+            select(User)
+            .where(
+                User.role.in_([Role.ADVISOR, Role.ADMIN]),
+                User.is_active.is_(True),
+                User.id != exclude,
+            )
+            .order_by(User.full_name)
+            .limit(10)
+        )
+        return list((await self.s.execute(stmt)).scalars())
 
     async def students_of_advisor(
         self, advisor_id: int, limit: int, offset: int
@@ -225,7 +301,33 @@ class AdminService:
                 )
             ).scalar_one()
         )
-        return {"student": student, "advisors": advisors, "plans": plans}
+        drafts = int(
+            (
+                await self.s.execute(
+                    select(func.count())
+                    .select_from(WeeklyPlanDB)
+                    .where(
+                        WeeklyPlanDB.student_id == student_id,
+                        WeeklyPlanDB.status == PlanStatusDB.DRAFT,
+                    )
+                )
+            ).scalar_one()
+        )
+        last = (
+            await self.s.execute(
+                select(AuditLog.at)
+                .where(AuditLog.student_id == student_id)
+                .order_by(AuditLog.at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        return {
+            "student": student,
+            "advisors": advisors,
+            "plans": plans,
+            "drafts": drafts,
+            "last_seen": last,
+        }
 
     # ───────────────────────────── database ─────────────────────────────
     async def db_stats(self) -> dict:

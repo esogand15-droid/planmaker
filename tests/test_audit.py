@@ -47,7 +47,7 @@ def _sample_advisor(active: bool = True):
                 telegram_id=555, is_active=active)
 
 
-def _sample_plan(with_versions: bool = False):
+def _sample_plan(with_versions: bool = False, with_files: bool = False):
     from app.db.models import PlanFile, PlanStatusDB, WeeklyPlanDB
 
     plan = WeeklyPlanDB(
@@ -57,6 +57,10 @@ def _sample_plan(with_versions: bool = False):
         status=PlanStatusDB.GENERATED, version=2,
     )
     plan.student = _sample_student()
+    plan.advisor = _sample_advisor()
+    if with_files:
+        plan.image_path = "a.png"
+        plan.pdf_path = "a.pdf"
     plan.files = (
         [
             PlanFile(id=i, plan_id=3, version=i, plan_hash="h", image_path="a.png",
@@ -130,6 +134,27 @@ def all_keyboards() -> dict:
         "admin_storage_clean": kb.admin_storage(0),
         "admin_system": kb.admin_system(),
         "admin_audit": kb.admin_audit(1, 40, 6),
+        "admin_delete_advisor_plain": kb.admin_delete_advisor(9, has_students=False),
+        "admin_delete_advisor_students": kb.admin_delete_advisor(9, has_students=True),
+        "admin_pick_transfer": kb.admin_pick_advisor(
+            [_sample_advisor()], 7, "del_advisor_to"
+        ),
+        "admin_pick_student_transfer": kb.admin_pick_advisor(
+            [_sample_advisor()], 7, "transfer_to"
+        ),
+        "admin_connection_pending": kb.admin_connection(pending),
+        "admin_connection_linked": kb.admin_connection(connected),
+        "admin_plans": kb.admin_plans([plan], 1, 40, 6),
+        "admin_plan_card": kb.admin_plan_card(_sample_plan(with_files=True)),
+        "admin_confirm_del_student": kb.admin_confirm("del_student", 7),
+        "admin_confirm_del_student_final": kb.admin_confirm("del_student_final", 7),
+        "admin_confirm_del_plan": kb.admin_confirm("del_plan", 3),
+        "admin_confirm_transfer": kb.admin_confirm("do_transfer", 7, "9"),
+        "admin_confirm_unlink": kb.admin_confirm("do_unlink", 7),
+        "confirm_remove_student_final": kb.confirm_remove_student(7, final=True),
+        "range_summary": kb.range_summary(7),
+        "confirm_new_invite": kb.confirm_new_invite(7),
+        "student_card_with_link": kb.student_card(pending, invite_link="https://t.me/x"),
     }
 
 
@@ -160,6 +185,8 @@ def test_every_emitted_callback_has_a_consumer():
     }
     orphans = []
     for origin, payload in emitted_payloads().items():
+        if payload == "noop":       # inert label button, answered by common.noop
+            continue
         prefix = payload.split(":")[0]
         factory = factories.get(prefix)
         assert factory is not None, f"{origin}: unknown prefix {prefix!r}"
@@ -205,7 +232,10 @@ def test_no_handler_is_unreachable():
         for cls in _iter_subclasses(CallbackData)
         if getattr(cls, "__prefix__", None)
     }
-    parsed_all = [factories[p.split(":")[0]].unpack(p) for p in payloads]
+    parsed_all = [
+        factories[p.split(":")[0]].unpack(p) for p in payloads
+        if p != "noop" and p.split(":")[0] in factories
+    ]
 
     unreachable = []
     for module in HANDLER_MODULES:
@@ -342,7 +372,13 @@ def test_no_unused_ui_strings():
         for p in (APP_DIR / "bot").rglob("*.py")
         if p.name != "texts.py"
     )
-    unused = [n for n in names if f"T.{n}" not in others and f"texts.{n}" not in others]
+    unused = [
+        n for n in names
+        if f"T.{n}" not in others
+        and f"texts.{n}" not in others
+        # a constant consumed by a helper inside texts.py itself is still used
+        and len(re.findall(rf"\b{n}\b", texts_src)) <= 1
+    ]
     assert unused == [], f"unused UI strings: {unused}"
 
 

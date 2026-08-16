@@ -1,97 +1,85 @@
-"""Persian text / date utilities: digits, Jalali conversion, RTL shaping fallback."""
+"""Persian text helpers.
+
+Date logic lives in `app.domain.calendar.JalaliDate`; the thin wrappers below
+keep the older call sites working while delegating to that single engine.
+"""
 from __future__ import annotations
 
-import os
 from datetime import date, datetime
-from zoneinfo import ZoneInfo
 
-import jdatetime
-
-#: All "today"/"this week" logic must follow the consultant's wall clock.
-#: On Railway the server runs in UTC, which is 3.5 hours behind Tehran — between
-#: 00:00 and 03:30 local time that would compute yesterday's week.
-TIMEZONE = ZoneInfo(os.getenv("TIMEZONE", "Asia/Tehran"))
-
-
-def now_local() -> datetime:
-    return datetime.now(TIMEZONE)
+from .calendar import (  # noqa: F401  (re-exported for existing imports)
+    FA_DIGITS,
+    JALALI_MONTHS,
+    TIMEZONE,
+    WEEKDAY_FA,
+    WEEKDAY_KEYS,
+    JalaliDate,
+)
 
 
-def today_local() -> date:
-    return now_local().date()
-
-FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹"
-EN_DIGITS = "0123456789"
-_TO_FA = str.maketrans(EN_DIGITS, FA_DIGITS)
-_TO_EN = str.maketrans(FA_DIGITS + "٠١٢٣٤٥٦٧٨٩", EN_DIGITS + EN_DIGITS)
-
-JALALI_MONTHS = [
-    "فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
-    "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند",
+__all__ = [
+    "FA_DIGITS", "JALALI_MONTHS", "TIMEZONE", "WEEKDAY_FA", "WEEKDAY_KEYS",
+    "JalaliDate", "now_local", "today_local", "to_fa_digits", "to_en_digits",
+    "apply_digit_style", "to_jalali", "jalali_short", "jalali_day_month",
+    "week_label", "jalali_to_gregorian", "parse_jalali", "saturday_of",
+    "normalize_fa", "shape_rtl",
 ]
 
 
+def now_local() -> datetime:
+    return JalaliDate.now()
+
+
+def today_local() -> date:
+    return JalaliDate.today()
+
+
 def to_fa_digits(text: str) -> str:
-    return text.translate(_TO_FA)
+    return JalaliDate.fa(text)
 
 
 def to_en_digits(text: str) -> str:
-    return text.translate(_TO_EN)
+    return JalaliDate.en_digits(text)
 
 
-def apply_digit_style(text: str, style: str) -> str:
+def apply_digit_style(text: str, style: str = "fa") -> str:
     return to_fa_digits(text) if style == "fa" else to_en_digits(text)
 
 
-def to_jalali(d: date) -> jdatetime.date:
-    return jdatetime.date.fromgregorian(date=d)
+def to_jalali(value: date):
+    return JalaliDate.to_jalali(value)
 
 
-def jalali_short(d: date, digits: str = "fa") -> str:
-    """1405/05/25 → ۱۴۰۵/۰۵/۲۵"""
-    j = to_jalali(d)
-    return apply_digit_style(f"{j.year:04d}/{j.month:02d}/{j.day:02d}", digits)
+def jalali_short(value: date, digits: str = "fa") -> str:
+    out = JalaliDate.short(value)
+    return out if digits == "fa" else to_en_digits(out)
 
 
-def jalali_day_month(d: date, digits: str = "fa") -> str:
-    """25 مرداد"""
-    j = to_jalali(d)
-    return apply_digit_style(f"{j.day} {JALALI_MONTHS[j.month - 1]}", digits)
+def jalali_day_month(value: date, digits: str = "fa") -> str:
+    out = JalaliDate.day_month(value)
+    return out if digits == "fa" else to_en_digits(out)
 
 
 def week_label(start: date, end: date, digits: str = "fa") -> str:
-    js, je = to_jalali(start), to_jalali(end)
-    if js.month == je.month:
-        return apply_digit_style(
-            f"{js.day} تا {je.day} {JALALI_MONTHS[je.month - 1]} {je.year}", digits
-        )
-    return apply_digit_style(
-        f"{js.day} {JALALI_MONTHS[js.month - 1]} تا {je.day} {JALALI_MONTHS[je.month - 1]} {je.year}",
-        digits,
-    )
+    out = JalaliDate.range_label(start, end)
+    return out if digits == "fa" else to_en_digits(out)
 
 
 def jalali_to_gregorian(year: int, month: int, day: int) -> date:
-    return jdatetime.date(year, month, day).togregorian()
+    return JalaliDate.from_jalali(year, month, day)
 
 
 def parse_jalali(text: str) -> date:
-    """Accepts 1405/05/25, ۱۴۰۵-۰۵-۲۵, 1405 5 25."""
-    cleaned = to_en_digits(text.strip()).replace("-", "/").replace(".", "/").replace(" ", "/")
-    parts = [p for p in cleaned.split("/") if p]
-    if len(parts) != 3:
-        raise ValueError("invalid jalali date")
-    y, m, d = (int(p) for p in parts)
-    return jalali_to_gregorian(y, m, d)
+    from .calendar import DateRangeError
+
+    try:
+        return JalaliDate.parse(text)
+    except DateRangeError as exc:
+        raise ValueError(str(exc)) from exc
 
 
-def saturday_of(d: date) -> date:
-    """Start of the Iranian week (Saturday) containing `d`."""
-    # python weekday(): Mon=0 .. Sat=5, Sun=6
-    offset = (d.weekday() - 5) % 7
-    from datetime import timedelta
-
-    return d - timedelta(days=offset)
+def saturday_of(value: date) -> date:
+    return JalaliDate.saturday_of(value)
 
 
 def normalize_fa(text: str) -> str:
@@ -99,16 +87,11 @@ def normalize_fa(text: str) -> str:
     if not text:
         return ""
     table = str.maketrans({"ي": "ی", "ك": "ک", "\u200f": "", "\u200e": "", "\ufeff": ""})
-    out = text.translate(table)
-    return " ".join(out.split())
+    return " ".join(text.translate(table).split())
 
 
 def shape_rtl(text: str) -> str:
-    """Fallback bidi shaping for engines without HarfBuzz/Raqm.
-
-    Pillow built with libraqm shapes natively — in that case this must NOT be
-    used (double shaping breaks the text). The renderer decides.
-    """
+    """Fallback bidi shaping for engines without HarfBuzz/Raqm."""
     import arabic_reshaper
     from bidi.algorithm import get_display
 

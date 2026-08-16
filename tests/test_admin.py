@@ -293,12 +293,12 @@ async def test_admin_can_open_every_panel_screen(bot_and_dp, world):
         "home": "پنل مدیریت",
         "advisors": "مشاوران",
         "students": "دانش‌آموزان",
-        "system": "وضعیت سیستم",
+        "system": "سلامت سیستم",
         "bot": "وضعیت ربات",
-        "db": "دیتابیس",
-        "storage": "Storage",
+        "db": "پایگاه داده",
+        "storage": "مدیریت فایل‌ها",
         "stats": "آمار",
-        "audit": "Audit",
+        "audit": "گزارش فعالیت‌ها",
         "settings": "تنظیمات",
     }
     for action, expected in screens.items():
@@ -321,7 +321,7 @@ async def test_admin_advisor_list_and_card(bot_and_dp, world):
     )
     body = texts(api)
     assert "مشاور اول" in body and "دانش‌آموزان" in body
-    assert any("غیرفعال" in b for b in buttons(api))
+    assert any("تعلیق" in b or "فعال‌سازی" in b for b in buttons(api))
 
 
 async def test_admin_can_suspend_and_reactivate_an_advisor(bot_and_dp, sessionmaker, world):
@@ -455,7 +455,7 @@ async def test_audit_screen_lists_real_events(bot_and_dp, sessionmaker, world):
     bot, api, dp = bot_and_dp
     api.clear()
     await dp.feed_update(bot, callback_update(AdminCB(action="audit").pack(), ADMIN_TG, 1))
-    assert "student.created" in texts(api)
+    assert "ایجاد دانش‌آموز" in texts(api)   # actions are shown in Persian
 
 
 async def test_health_probe_reports_live_services(sessionmaker, queue):

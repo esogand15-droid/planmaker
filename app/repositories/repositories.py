@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import lazyload, selectinload
 
 from ..db.models import (
     ActivityDB,
@@ -247,12 +248,28 @@ class PlanRepository:
         self.s = session
 
     async def get(self, plan_id: int) -> WeeklyPlanDB | None:
-        return await self.s.get(WeeklyPlanDB, plan_id)
+        """Full load. `populate_existing` matters: the same object may already
+        be in the identity map from a *light* list query with its heavy
+        relationships deliberately unloaded."""
+        stmt = (
+            select(WeeklyPlanDB)
+            .where(WeeklyPlanDB.id == plan_id)
+            .options(
+                selectinload(WeeklyPlanDB.student),
+                selectinload(WeeklyPlanDB.advisor),
+                selectinload(WeeklyPlanDB.days).selectinload(PlanDayDB.activities),
+                selectinload(WeeklyPlanDB.assignments),
+                selectinload(WeeklyPlanDB.files),
+            )
+            .execution_options(populate_existing=True)
+        )
+        return (await self.s.execute(stmt)).scalar_one_or_none()
 
     async def create(
         self, *, student_id: int, advisor_id: int, week_start: date, week_end: date
     ) -> WeeklyPlanDB:
-        from ..domain.models import WEEKDAY_KEYS
+        """Create a plan whose days come from the real calendar range."""
+        from ..domain.calendar import JalaliDate
 
         plan = WeeklyPlanDB(
             student_id=student_id,
@@ -261,11 +278,9 @@ class PlanRepository:
             week_end=week_end,
             status=PlanStatusDB.DRAFT,
         )
-        from datetime import timedelta
-
         plan.days = [
-            PlanDayDB(weekday=key, day_index=i, date=week_start + timedelta(days=i))
-            for i, key in enumerate(WEEKDAY_KEYS)
+            PlanDayDB(weekday=d.weekday_key, day_index=d.index - 1, date=d.date)
+            for d in JalaliDate.range(week_start, week_end)
         ]
         self.s.add(plan)
         await self.s.flush()
@@ -278,6 +293,7 @@ class PlanRepository:
     ) -> list[WeeklyPlanDB]:
         stmt = (
             select(WeeklyPlanDB)
+            .options(*self.LIST_ONLY)
             .where(
                 WeeklyPlanDB.advisor_id == advisor_id,
                 WeeklyPlanDB.status == PlanStatusDB.DRAFT,
@@ -314,6 +330,15 @@ class PlanRepository:
         stmt = select(WeeklyPlanDB).where(WeeklyPlanDB.week_end < cutoff)
         return list((await self.s.execute(stmt)).scalars())
 
+    #: a list screen only needs the label fields + the student's name
+    LIST_ONLY = (
+        lazyload(WeeklyPlanDB.days),
+        lazyload(WeeklyPlanDB.assignments),
+        lazyload(WeeklyPlanDB.files),
+        lazyload(WeeklyPlanDB.advisor),
+        selectinload(WeeklyPlanDB.student),
+    )
+
     async def history(
         self,
         *,
@@ -322,8 +347,12 @@ class PlanRepository:
         limit: int = 6,
         offset: int = 0,
         only_generated: bool = False,
+        light: bool = True,
     ) -> list[WeeklyPlanDB]:
+        """`light` (default) skips the heavy relationships a list never shows."""
         stmt = select(WeeklyPlanDB)
+        if light:
+            stmt = stmt.options(*self.LIST_ONLY)
         if advisor_id is not None:
             stmt = stmt.where(WeeklyPlanDB.advisor_id == advisor_id)
         if student_id is not None:

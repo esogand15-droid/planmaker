@@ -238,7 +238,8 @@ async def test_start_escapes_a_stuck_wizard(bot_and_dp, world):
     assert "➕ برنامه جدید" in labels
 
 
-async def test_invalid_custom_week_date_is_reported_not_crashing(bot_and_dp, world):
+async def test_invalid_custom_date_is_reported_not_crashing(bot_and_dp, world):
+    """Custom mode asks for a real range; bad input must not break the flow."""
     bot, api, dp = bot_and_dp
     await dp.feed_update(
         bot, callback_update(
@@ -246,12 +247,22 @@ async def test_invalid_custom_week_date_is_reported_not_crashing(bot_and_dp, wor
     )
     api.clear()
     await dp.feed_update(bot, message_update("فردا", ADVISOR_TG, 2))
-    assert any("نامعتبر" in t for t in api.texts())
-    # a valid date afterwards still works (state survived the mistake)
-    api.clear()
+    assert any("قالب تاریخ" in t or "تقویم" in t for t in api.texts())
+
+    api.clear()  # a valid start is accepted and the end is requested
     await dp.feed_update(bot, message_update("1405/07/03", ADVISOR_TG, 3))
-    assert any("شنبه" in " ".join(b.text for row in m.inline_keyboard for b in row)
-               for m in markups(api))
+    assert any("تاریخ پایان" in t for t in api.texts())
+
+    api.clear()  # an end before the start is refused with a clear reason
+    await dp.feed_update(bot, message_update("1405/07/01", ADVISOR_TG, 4))
+    assert any("پایان نمی‌تواند قبل" in t for t in api.texts())
+
+    api.clear()  # a valid end produces the range summary
+    await dp.feed_update(bot, message_update("1405/07/05", ADVISOR_TG, 5))
+    body = " ".join(api.texts())
+    assert "خلاصه بازه" in body and "تعداد روز: ۳" in body
+    # weekdays come from the real calendar, even across a week boundary
+    assert "۱. جمعه" in body and "۲. شنبه" in body and "۳. یکشنبه" in body
 
 
 async def test_student_screen_is_minimal(bot_and_dp, world):
