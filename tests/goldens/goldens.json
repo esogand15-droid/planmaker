@@ -1,0 +1,16 @@
+{
+  "template_version": "rotbeland-weekly-v2",
+  "renderer_version": "2.0.0",
+  "crop": [
+    258,
+    876,
+    1278,
+    1009
+  ],
+  "cases": [
+    "assignment_flow",
+    "assignment_list",
+    "assignment_mixed",
+    "assignment_short"
+  ]
+}

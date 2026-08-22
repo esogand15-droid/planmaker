@@ -210,6 +210,69 @@ def cmd_set_assignments(layout: TemplateLayout, x: int, y: int, w: int, h: int) 
     print("assignments box updated")
 
 
+def cmd_assignment(layout: TemplateLayout) -> None:
+    """Debug overlay of the assignment area: boxes, bands, baselines, ink."""
+    from PIL import ImageDraw
+
+    from app.domain.models import Assignment, WeeklyPlan
+    from app.domain.persian import jalali_to_gregorian
+    from app.rendering.compose import fit_assignments
+    from app.rendering.fit import ink_metrics, load_font, text_width
+
+    outer = layout.assignments_outer
+    title = layout.assignments_title
+    body = layout.assignments_body
+    bands = layout.assignment_line_boxes()
+    widths = layout.assignment_usable_widths()
+    cfg = layout.typography["assignments"]
+
+    print(f"outer      x={outer.x} y={outer.y} w={outer.w} h={outer.h}")
+    if title:
+        print(f"title      x={title.x} y={title.y} w={title.w} h={title.h}")
+    print(f"body       x={body.x} y={body.y} w={body.w} h={body.h}")
+    print(f"rules      {layout.assignments_cfg.get('rules')}")
+    print(f"max_lines  {len(bands)}   font {cfg['min_size']}..{cfg['max_size']}")
+    for i, (band, usable) in enumerate(zip(bands, widths), start=1):
+        ink = ink_metrics(str(layout.font_path("medium")), cfg["max_size"])
+        gap = int(layout.assignments_cfg.get("baseline_gap", 1))
+        print(f"  band {i}   x={band.x} y={band.y} w={band.w} h={band.h} "
+              f"usable_w={usable}  baseline={band.bottom - ink.bottom - gap}")
+
+    plan = WeeklyPlan(student_name="نمونه", student_id="0")
+    plan.apply_week_start(jalali_to_gregorian(1405, 6, 7))
+    for i, text in enumerate(("مرور فصل گوارش", "حل ۴۰ تست ریاضی",
+                              "تحلیل تست‌های غلط")):
+        plan.assignments.append(Assignment(text=text, order=i))
+    placed = fit_assignments(plan, layout)
+
+    img = Image.open(layout.template_path).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    draw.rectangle(outer.as_tuple(), outline=(0, 160, 0), width=2)
+    if title:
+        draw.rectangle(title.as_tuple(), outline=(255, 140, 0), width=2)
+    draw.rectangle(body.as_tuple(), outline=(0, 90, 255), width=1)
+    for i, band in enumerate(bands):
+        draw.rectangle(band.as_tuple(), outline=(255, 0, 255), width=1)
+        if i < len(placed.baselines):
+            y = placed.baselines[i]
+            draw.line((band.x, y, band.right, y), fill=(255, 0, 0), width=1)
+            font = load_font(str(layout.font_path("medium")), placed.font_size)
+            w = text_width(placed.lines[i], font)
+            ink = ink_metrics(str(layout.font_path("medium")), placed.font_size)
+            draw.rectangle(
+                (band.right - w - cfg["pad_x"], y + ink.top,
+                 band.right - cfg["pad_x"], y + ink.bottom),
+                outline=(0, 200, 200), width=1,
+            )
+    out = ROOT / "out" / "calibration" / f"{layout.version}-assignment.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    img.crop((outer.x - 40, (title.y if title else outer.y) - 20,
+              outer.right + 40, outer.bottom + 20)).save(out)
+    print(f"overlay → {out}")
+    print(f"status={placed.status} size={placed.font_size} "
+          f"lines={len(placed.lines)} baselines={[round(b) for b in placed.baselines]}")
+
+
 def cmd_templates() -> None:
     for info in available():
         mark = "★ فعال" if info.active else "  قدیمی"
@@ -237,6 +300,8 @@ def main() -> None:
         cmd_fill(layout)
     elif cmd == "nudge":
         cmd_nudge(layout, args[1], int(args[2]), int(args[3]))
+    elif cmd == "assignment":
+        cmd_assignment(layout)
     elif cmd == "set" and args[1] == "assignments":
         cmd_set_assignments(layout, *(int(v) for v in args[2:6]))
     else:

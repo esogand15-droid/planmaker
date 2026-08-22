@@ -631,16 +631,79 @@
     "pad": 1
   },
   "assignments": {
-    "x": 285,
-    "y": 930,
-    "w": 1150,
-    "h": 62,
+    "_measured": "pixel analysis of assets/templates/weekly_plan_v2.png (2026-08-22)",
+    "outer": {
+      "x": 268,
+      "y": 916,
+      "w": 1000,
+      "h": 83
+    },
+    "title": {
+      "x": 650,
+      "y": 884,
+      "w": 234,
+      "h": 53
+    },
+    "body": {
+      "x": 287,
+      "y": 919,
+      "w": 961,
+      "h": 78
+    },
+    "x": 287,
+    "y": 919,
+    "w": 961,
+    "h": 78,
     "rules": [
       946,
-      972
+      973
     ],
-    "rule_offset": 5,
-    "separator": "   —   "
+    "rule_stroke": 2,
+    "border": {
+      "top": 917,
+      "bottom": 997,
+      "left": 269,
+      "right": 1267
+    },
+    "safe_margin": {
+      "left": 4,
+      "right": 4,
+      "top": 2,
+      "bottom": 2
+    },
+    "lines": [
+      {
+        "x": 287,
+        "y": 919,
+        "w": 961,
+        "h": 26
+      },
+      {
+        "x": 287,
+        "y": 948,
+        "w": 961,
+        "h": 24
+      },
+      {
+        "x": 287,
+        "y": 975,
+        "w": 961,
+        "h": 22
+      }
+    ],
+    "baseline_gap": 1,
+    "max_lines": 3,
+    "list_layout": true,
+    "separator": "   —   ",
+    "obstacles": [
+      {
+        "x": 650,
+        "y": 884,
+        "w": 234,
+        "h": 53,
+        "note": "printed «تکالیف» chip + its two decorative diamonds (measured 650..884 x 884..936)"
+      }
+    ]
   },
   "static_regions": {
     "header_logo": {
@@ -662,10 +725,10 @@
       "h": 700
     },
     "assignment_title": {
-      "x": 600,
-      "y": 892,
-      "w": 400,
-      "h": 40
+      "x": 650,
+      "y": 884,
+      "w": 234,
+      "h": 53
     },
     "decorations": "corners, waves, birds, gold lines, calendar icons"
   },
@@ -690,11 +753,11 @@
       "min_size": 12
     },
     "assignments": {
-      "max_size": 19,
-      "min_size": 12,
-      "line_gap": 1.35,
-      "pad_x": 8,
-      "pad_y": 4
+      "max_size": 18,
+      "min_size": 13,
+      "line_gap": 1.3,
+      "pad_x": 4,
+      "pad_y": 2
     }
   },
   "digits": "fa",
