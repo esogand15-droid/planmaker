@@ -6,8 +6,8 @@ import os
 
 from .base import BaseRenderer
 from .html_renderer import HtmlRenderer
-from .layout import TemplateLayout
 from .pillow_renderer import PillowRenderer
+from .registry import DEFAULT_TEMPLATE, load_layout
 
 log = logging.getLogger(__name__)
 
@@ -15,11 +15,11 @@ BACKENDS = {"pillow": PillowRenderer, "html": HtmlRenderer}
 
 
 def get_renderer(
-    backend: str | None = None, template: str = "template_weekly_v1"
+    backend: str | None = None, template: str | None = None
 ) -> BaseRenderer:
-    """`backend` in {'html','pillow','auto'}; env RENDER_BACKEND overrides default."""
+    """`backend` in {'html','pillow','auto'}; `template` is a version or config name."""
     backend = (backend or os.getenv("RENDER_BACKEND", "auto")).lower()
-    layout = TemplateLayout.load(template)
+    layout = load_layout(template or DEFAULT_TEMPLATE)
 
     if backend == "auto":
         backend = "html" if HtmlRenderer.available() else "pillow"

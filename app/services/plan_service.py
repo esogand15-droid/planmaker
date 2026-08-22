@@ -14,6 +14,7 @@ from pathlib import Path
 from ..domain.models import PlanStatus, WeeklyPlan
 from ..domain.persian import today_local, week_label
 from ..rendering.base import BaseRenderer, OverflowIssue
+from ..rendering.base import BaseRenderer
 from ..rendering.factory import get_renderer
 from ..rendering.pdf import png_to_pdf
 
@@ -77,20 +78,41 @@ class WeeklyPlanService:
 
             fallback_renderer = PillowRenderer(self.renderer.layout)
         self.fallback_renderer = fallback_renderer
+        self._by_template: dict[str, BaseRenderer] = {
+            self.renderer.layout.version: self.renderer
+        }
+
+    def renderer_for(self, template_version: str | None) -> BaseRenderer:
+        """Old plans keep their original sheet; new ones use the default."""
+        from ..rendering.registry import resolve
+
+        info = resolve(template_version)
+        if info.version == self.renderer.layout.version:
+            return self.renderer
+        if info.version not in self._by_template:
+            log.info("loading legacy template %s for an older plan", info.version)
+            self._by_template[info.version] = get_renderer(
+                getattr(self.renderer, "backend_key", "pillow"), info.version
+            )
+        return self._by_template[info.version]
 
     def _render_png(self, plan: WeeklyPlan, scale: float):
+        renderer = self.renderer_for(getattr(plan, "template_version", None))
         try:
-            return self.renderer.render_png(plan, scale=scale)
+            return renderer.render_png(plan, scale=scale)
         except Exception:
             if self.fallback_renderer is None:
                 raise
             log.exception(
                 "renderer %s failed — falling back to %s",
-                self.renderer.signature, self.fallback_renderer.signature,
+                renderer.signature, self.fallback_renderer.signature,
             )
             return self.fallback_renderer.render_png(plan, scale=scale)
 
     # ------------------------------------------------------------------
+    def layout_for(self, plan: WeeklyPlan):
+        return self.renderer_for(getattr(plan, "template_version", None)).layout
+
     def validate(self, plan: WeeklyPlan) -> ValidationReport:
         errors: list[str] = []
         if not plan.student_name and not plan.student_id:
@@ -101,13 +123,14 @@ class WeeklyPlanService:
             errors.append("تاریخ پایان هفته باید بعد از تاریخ شروع باشد.")
         if plan.activity_count == 0:
             errors.append("حداقل یک فعالیت باید در برنامه وارد شود.")
-        if not self.renderer.layout.template_path.exists():
+        renderer = self.renderer_for(getattr(plan, "template_version", None))
+        if not renderer.layout.template_path.exists():
             errors.append("فایل قالب در دسترس نیست.")
         for weight in ("regular", "medium", "bold"):
-            if not self.renderer.layout.font_path(weight).exists():
+            if not renderer.layout.font_path(weight).exists():
                 errors.append("فونت برنامه در دسترس نیست.")
                 break
-        issues = self.renderer.validate(plan) if not errors else []
+        issues = renderer.validate(plan) if not errors else []
         return ValidationReport(errors=errors, issues=issues)
 
     # ------------------------------------------------------------------
@@ -139,8 +162,9 @@ class WeeklyPlanService:
             raise PlanGenerationError("؛ ".join(report.errors))
 
         started = time.perf_counter()
-        layout = self.renderer.layout
-        plan_hash = plan.content_hash(layout.version, self.renderer.signature)
+        renderer = self.renderer_for(getattr(plan, "template_version", None))
+        layout = renderer.layout
+        plan_hash = plan.content_hash(layout.version, renderer.signature)
         out_dir = self._dir_for(plan)
         stem = f"{self.file_stem(plan)}_{plan_hash}"
         png_path = out_dir / f"{stem}.png"
@@ -172,7 +196,7 @@ class WeeklyPlanService:
         log.info(
             "generate plan_id=%s student=%s advisor=%s renderer=%s template=%s "
             "hash=%s cached=%s duration_ms=%s",
-            plan.id, plan.student_id, plan.advisor_id, self.renderer.signature,
+            plan.id, plan.student_id, plan.advisor_id, renderer.signature,
             layout.version, plan_hash, cached, duration,
         )
         return GeneratedPlan(

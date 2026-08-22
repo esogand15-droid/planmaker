@@ -74,6 +74,7 @@ def _b64(path: str) -> str:
 
 class HtmlRenderer(BaseRenderer):
     name = "html-chromium"
+    backend_key = "html"
     renderer_version = "1.0.0"
 
     def __init__(self, layout: TemplateLayout):
@@ -137,7 +138,8 @@ class HtmlRenderer(BaseRenderer):
             dates.append({
                 "key": weekday,
                 "box": box,
-                "text": f"تاریخ : {jalali_short(day.date, digits)}",
+                "text": f"{lay.raw().get('date_prefix', '')}"
+                        f"{jalali_short(day.date, digits)}",
                 "size": tcfg["date"]["max_size"],
             })
 
@@ -166,15 +168,17 @@ class HtmlRenderer(BaseRenderer):
         rules = acfg.get("rules") or []
         box = lay.assignments_box
         lines = assignment_lines(plan, self.layout)
-        for i, text in enumerate(lines):
-            rule_y = rules[i] if i < len(rules) else box.y + 28 * (i + 1)
-            height = 24
+        # same geometry as the Pillow backend: one equal band per ruled line,
+        # text centred in it so it sits on the printed rule and never spills out
+        bands = len(rules) or max(1, len(lines))
+        band = box.h / bands
+        for i, text in enumerate(lines[:bands]):
             assignments.append({
                 "text": text,
                 "right": box.right,
                 "width": box.w,
-                "top": rule_y - acfg.get("rule_offset", 6) - height,
-                "height": height,
+                "top": round(box.y + band * i),
+                "height": round(band),
                 "size": tcfg["assignments"]["max_size"],
                 "min_size": tcfg["assignments"]["min_size"],
             })
@@ -187,7 +191,10 @@ class HtmlRenderer(BaseRenderer):
             font_regular_b64=_b64(str(lay.font_path("regular"))),
             font_medium_b64=_b64(str(lay.font_path("medium"))),
             font_bold_b64=_b64(str(lay.font_path("bold"))),
-            green=_rgb(lay.color("brand_green")),
+            date_bg=_rgb(
+                lay.color_or("date_mask", lay.color_or("brand_green", (255, 255, 255)))
+            ),
+            date_prefix=lay.raw().get("date_prefix", ""),
             cell_color=_rgb(lay.color("cell_text")),
             date_color=_rgb(lay.color("date_text")),
             assign_color=_rgb(lay.color("assignment_text")),

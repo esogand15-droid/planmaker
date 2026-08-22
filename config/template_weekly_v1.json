@@ -530,5 +530,6 @@
       "pad_y": 4
     }
   },
-  "digits": "fa"
+  "digits": "fa",
+  "date_prefix": "تاریخ : "
 }

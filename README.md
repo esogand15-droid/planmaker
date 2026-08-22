@@ -7,10 +7,10 @@
 
 | | |
 |---|---|
-| Version | **1.2.0** |
-| Template Version | `rotbeland-weekly-v1` |
+| Version | **1.3.0** |
+| Template Version | `rotbeland-weekly-v2` · قدیمی: `rotbeland-weekly-v1` |
 | Renderer Version | `html-chromium-1.0.0` (اصلی) · `pillow-1.0.0` (fallback) |
-| Tests | **413 passed** (Renderer 26 · BotFlow 13 · Security 36 · Deployment 19 · UX 118 · Students 55 · Admin 45 · Delete/Admin 32 · Calendar 35 · Access 23 · Audit 14) |
+| Tests | **452 passed** (Renderer 26 · BotFlow 13 · Security 36 · Deployment 19 · UX 118 · Students 55 · Admin 45 · Delete/Admin 32 · Calendar 35 · Access 23 · Template v2 36 · Audit 14) |
 | Stack | Python 3.12 · aiogram 3 · SQLAlchemy 2 async · PostgreSQL · Alembic · Pillow/libraqm · Playwright |
 
 ---

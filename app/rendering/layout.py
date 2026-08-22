@@ -92,6 +92,26 @@ class TemplateLayout:
     def date_mask(self) -> dict[str, Any]:
         return self._d.get("date_mask", {"enabled": True, "pad": 3})
 
+    def day_card(self, weekday: str) -> Box | None:
+        cards = self._d.get("day_cards") or {}
+        return Box(**cards[weekday]) if weekday in cards else None
+
+    def day_name_box(self, weekday: str) -> Box | None:
+        boxes = self._d.get("day_name_boxes") or {}
+        return Box(**boxes[weekday]) if weekday in boxes else None
+
+    @property
+    def static_regions(self) -> dict[str, Any]:
+        return self._d.get("static_regions", {})
+
+    @property
+    def dynamic_regions(self) -> list[str]:
+        return self._d.get("dynamic_regions", ["cells", "date_boxes", "assignments"])
+
+    def color_or(self, key: str, fallback: tuple[int, int, int]) -> tuple[int, int, int]:
+        raw = self._d.get("colors", {}).get(key)
+        return tuple(raw) if raw else fallback  # type: ignore[return-value]
+
     # ---- persistence (calibration tool writes back) ----
     def save(self) -> None:
         with open(self.config_path, "w", encoding="utf-8") as fh:

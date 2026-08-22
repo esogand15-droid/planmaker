@@ -140,6 +140,8 @@ class WeeklyPlan:
     week_end: date | None = None
     status: PlanStatus = PlanStatus.DRAFT
     version: int = 1
+    #: which official sheet this plan was (or will be) printed on
+    template_version: str | None = None
     days: list[PlanDay] = field(default_factory=list)
     assignments: list[Assignment] = field(default_factory=list)
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])

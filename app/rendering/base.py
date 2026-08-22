@@ -53,6 +53,8 @@ class BaseRenderer(ABC):
     """
 
     name: str = "base"
+    #: the key `get_renderer()` accepts for this backend
+    backend_key: str = "base"
     renderer_version: str = "1.0.0"
 
     def __init__(self, layout: TemplateLayout):

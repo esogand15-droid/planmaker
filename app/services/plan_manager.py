@@ -376,6 +376,7 @@ class PlanManager:
             student_id=str(plan.student_id),
             advisor_id=str(plan.advisor_id),
             version=plan.version,
+            template_version=plan.template_version,
             days=[
                 PlanDay(
                     weekday=d.weekday,

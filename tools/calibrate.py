@@ -1,6 +1,6 @@
 """Template calibration tool (developer/admin utility).
 
-Usage:
+Usage (add --template <version|config> to target a specific sheet):
   python -m tools.calibrate grid            # overlay grid + coordinates
   python -m tools.calibrate probe           # re-detect lines from the template
   python -m tools.calibrate fill            # fill every cell with sample text
@@ -25,48 +25,136 @@ from app.domain.models import WEEKDAY_KEYS, Activity, Assignment, WeeklyPlan  # 
 from app.domain.persian import jalali_to_gregorian  # noqa: E402
 from app.rendering.fit import load_font  # noqa: E402
 from app.rendering.layout import TemplateLayout  # noqa: E402
+from app.rendering.registry import DEFAULT_TEMPLATE, available, load_layout  # noqa: E402
 from app.rendering.pillow_renderer import PillowRenderer  # noqa: E402
 
-OUT = ROOT / "out"
-OUT.mkdir(exist_ok=True)
+OUT = ROOT / "out" / "calibration"
+OUT.mkdir(parents=True, exist_ok=True)
 
 
 def cmd_grid(layout: TemplateLayout) -> None:
+    """Overlay every configured region so the coordinates can be eyeballed."""
     img = Image.open(layout.template_path).convert("RGB")
     draw = ImageDraw.Draw(img, "RGBA")
     font = load_font(str(layout.font_path("regular")), 11)
-    for weekday in WEEKDAY_KEYS:
+    for row, weekday in enumerate(WEEKDAY_KEYS):
         for slot, box in enumerate(layout.cells(weekday)):
             draw.rectangle(box.as_tuple(), outline=(220, 30, 60, 200), width=1)
-            draw.text((box.x + 3, box.y + 2), f"{slot + 1}", font=font, fill=(220, 30, 60))
-            draw.text((box.x + 3, box.y + 14), f"{box.x},{box.y}", font=font,
+            draw.text((box.x + 3, box.y + 2), f"r{row + 1}s{slot + 1}", font=font,
+                      fill=(220, 30, 60))
+            draw.text((box.x + 3, box.y + 15), f"{box.x},{box.y}", font=font,
                       fill=(120, 120, 160))
         d = layout.date_box(weekday)
-        draw.rectangle(d.as_tuple(), outline=(255, 200, 0, 220), width=1)
+        draw.rectangle(d.as_tuple(), outline=(255, 170, 0, 230), width=1)
+        draw.text((d.x, d.y - 12), f"date {d.x},{d.y}", font=font, fill=(200, 120, 0))
+        card = layout.day_card(weekday)
+        if card:
+            draw.rectangle(card.as_tuple(), outline=(0, 180, 90, 160), width=1)
+        name = layout.day_name_box(weekday)
+        if name:
+            draw.rectangle(name.as_tuple(), outline=(140, 0, 200, 160), width=1)
     a = layout.assignments_box
     draw.rectangle(a.as_tuple(), outline=(0, 120, 255, 220), width=1)
     for y in layout.assignments_cfg.get("rules", []):
         draw.line((a.x, y, a.right, y), fill=(0, 200, 120, 220), width=1)
-    path = OUT / "calibration_grid.png"
+    draw.text((a.x, a.y - 14), f"assignments {a.x},{a.y} {a.w}x{a.h}", font=font,
+              fill=(0, 90, 200))
+    path = OUT / f"{layout.version}-grid.png"
     img.save(path)
     print(f"→ {path}")
 
 
 def cmd_probe(layout: TemplateLayout) -> None:
-    """Detect grid lines straight from the template pixels (source of truth)."""
-    a = np.asarray(Image.open(layout.template_path).convert("RGB")).astype(int)
+    """Re-measure the sheet from its own pixels and compare with the config."""
+    img = Image.open(layout.template_path).convert("RGB")
+    a = np.asarray(img).astype(int)
+    grid = layout.grid
+    cols = grid.get("column_bounds")
+    rows = grid.get("row_bounds")
+
+    if cols and rows:                     # v2-style config: explicit bounds
+        print(f"  canvas: {img.size[0]}×{img.size[1]} (config "
+              f"{layout.width}×{layout.height})")
+        _verify_boxes(a, layout)
+        return
+
+    # v1-style config: derive the lines from the drawn grid
     lum = a.sum(2) / 3
     dark = lum < 170
-    g = layout.grid
-    y0, y1 = g["y_lines"][0] - 30, g["y_lines"][-1] + 30
-    cols = dark[y0:y1, :].sum(0)
-    rows = dark[:, g["x_lines"][0] + 10:g["x_lines"][-1] - 10].sum(1)
-    x_lines = _peaks([int(c) for c in cols], threshold=(y1 - y0) * 0.6)
-    y_lines = _peaks([int(r) for r in rows], threshold=(g["x_lines"][-1] - g["x_lines"][0]) * 0.6)
-    print("detected x lines:", x_lines)
-    print("config   x lines:", g["x_lines"])
-    print("detected y lines:", y_lines)
-    print("config   y lines:", g["y_lines"])
+    y0, y1 = grid["y_lines"][0] - 30, grid["y_lines"][-1] + 30
+    cols_profile = dark[y0:y1, :].sum(0)
+    rows_profile = dark[:, grid["x_lines"][0] + 10:grid["x_lines"][-1] - 10].sum(1)
+    x_lines = _peaks([int(c) for c in cols_profile], threshold=(y1 - y0) * 0.6)
+    y_lines = _peaks(
+        [int(r) for r in rows_profile],
+        threshold=(grid["x_lines"][-1] - grid["x_lines"][0]) * 0.6,
+    )
+    print("  detected x lines:", x_lines)
+    print("  config   x lines:", grid["x_lines"])
+    print("  detected y lines:", y_lines)
+    print("  config   y lines:", grid["y_lines"])
+
+
+def _verify_boxes(a, layout: TemplateLayout) -> None:
+    """Semantic check: every configured box must sit on empty template space.
+
+    Coordinate equality is the wrong test (strokes are a few pixels wide and
+    the corners are rounded). What actually matters is that no dynamic region
+    overlaps printed artwork and that each cell interior is blank.
+    """
+    import numpy as np
+
+    def ink(box) -> int:
+        patch = a[box.y:box.bottom, box.x:box.right]
+        if patch.size == 0:
+            return -1
+        # anything clearly darker than the cream fill counts as printed ink
+        return int((patch.sum(2) / 3 < 215).sum())
+
+    problems = 0
+    empty_cells = 0
+    for weekday in WEEKDAY_KEYS:
+        for slot, box in enumerate(layout.cells(weekday)):
+            if box.x < 0 or box.right > layout.width or box.bottom > layout.height:
+                print(f"  ✖ {weekday} slot {slot + 1}: outside the canvas")
+                problems += 1
+                continue
+            found = ink(box)
+            if found > 0:
+                print(f"  ✖ {weekday} slot {slot + 1}: {found}px of artwork inside "
+                      f"the text area {box.as_tuple()}")
+                problems += 1
+            else:
+                empty_cells += 1
+    print(f"  cells: {empty_cells}/56 clear of artwork")
+
+    for weekday in WEEKDAY_KEYS:
+        box = layout.date_box(weekday)
+        found = ink(box)
+        # the date box *should* contain the __/__/__ placeholder we mask over
+        print(f"  {weekday:10} date box {box.as_tuple()} placeholder ink: {found}px")
+        if found == 0:
+            print("     ⚠ no placeholder found — is the box in the right place?")
+            problems += 1
+
+    a_box = layout.assignments_box
+    print(f"  assignments {a_box.as_tuple()} ink: {ink(a_box)}px "
+          f"(dotted rules are expected)")
+    print("  → calibration OK" if problems == 0 else f"  → {problems} problem(s)")
+
+
+def _report(what: str, measured: list[int], config: list[int], tolerance: int = 2) -> None:
+    """The drawn stroke is a couple of pixels wide, so compare with a tolerance."""
+    if len(measured) != len(config):
+        print(f"  → {what}: DIFFERENT COUNT — measured {len(measured)}, "
+              f"config {len(config)}; re-derive the config")
+        return
+    deviations = [abs(m - c) for m, c in zip(measured, config)]
+    worst = max(deviations) if deviations else 0
+    if worst <= tolerance:
+        print(f"  → {what}: match (max deviation {worst}px, tolerance {tolerance}px)")
+    else:
+        print(f"  → {what}: DIFFERENT (max deviation {worst}px) — update the config")
 
 
 def _peaks(profile: list[int], threshold: float) -> list[int]:
@@ -91,7 +179,7 @@ def cmd_fill(layout: TemplateLayout) -> None:
         plan.assignments.append(Assignment(text=f"تکلیف نمونه شماره {i + 1}", order=i))
     renderer = PillowRenderer(layout)
     res = renderer.render_png(plan)
-    path = OUT / "calibration_fill.png"
+    path = OUT / f"{layout.version}-fill.png"
     path.write_bytes(res.png)
     print(f"→ {path}  issues={len(res.issues)}")
     for issue in res.issues:
@@ -122,9 +210,24 @@ def cmd_set_assignments(layout: TemplateLayout, x: int, y: int, w: int, h: int) 
     print("assignments box updated")
 
 
+def cmd_templates() -> None:
+    for info in available():
+        mark = "★ فعال" if info.active else "  قدیمی"
+        print(f"  {mark}  {info.version:24} config={info.config}")
+
+
 def main() -> None:
     args = sys.argv[1:] or ["grid"]
-    layout = TemplateLayout.load()
+    template = DEFAULT_TEMPLATE
+    if "--template" in args:
+        i = args.index("--template")
+        template = args[i + 1]
+        del args[i:i + 2]
+    if args and args[0] == "templates":
+        cmd_templates()
+        return
+    layout = load_layout(template)
+    print(f"template: {layout.version}")
     cmd = args[0]
     if cmd == "grid":
         cmd_grid(layout)

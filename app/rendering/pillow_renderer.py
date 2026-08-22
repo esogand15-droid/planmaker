@@ -19,6 +19,7 @@ from .layout import TemplateLayout
 
 class PillowRenderer(BaseRenderer):
     name = "pillow"
+    backend_key = "pillow"
     renderer_version = "1.0.0"
 
     def __init__(self, layout: TemplateLayout):
@@ -171,7 +172,11 @@ class PillowRenderer(BaseRenderer):
     def _draw_dates(self, draw, img, plan: WeeklyPlan, scale: float, issues: list) -> None:
         cfg = self.layout.typography["date"]
         mask_cfg = self.layout.date_mask
-        green = self.layout.color("brand_green")
+        # v1 painted over a dark green chip; v2 has a light strip — take the
+        # mask colour from the template itself so nothing else changes.
+        mask_color = self.layout.color_or(
+            "date_mask", self.layout.color_or("brand_green", (255, 255, 255))
+        )
         color = self.layout.color("date_text")
         for weekday in WEEKDAY_KEYS:
             day = plan.day(weekday)
@@ -182,9 +187,10 @@ class PillowRenderer(BaseRenderer):
                 pad = round(mask_cfg.get("pad", 3) * scale)
                 draw.rectangle(
                     (box.x - pad, box.y - pad, box.right + pad, box.bottom + pad),
-                    fill=green,
+                    fill=mask_color,
                 )
-            text = f"تاریخ : {jalali_short(day.date, self.layout.digits)}"
+            prefix = self.layout.raw().get("date_prefix", "")
+            text = f"{prefix}{jalali_short(day.date, self.layout.digits)}"
             size = max(8, round(cfg["max_size"] * scale))
             font = load_font(str(self.layout.font_path("medium")), size)
             while text_width(text, font) > box.w and size > round(cfg["min_size"] * scale):
@@ -248,11 +254,14 @@ class PillowRenderer(BaseRenderer):
         color = self.layout.color("assignment_text")
         pad_x = round(cfg["pad_x"] * scale)
         rules = acfg.get("rules") or []
-        offset = acfg.get("rule_offset", 6)
         if rules:
-            # baseline-ish placement just above each dotted rule of the template
-            for line, rule_y in zip(res.lines, rules):
-                y = round((rule_y - offset) * scale) - size
+            # Each ruled line gets an equal band inside the box and the text is
+            # centred in it: that lands the glyphs on the printed rule without
+            # ever spilling above the panel.
+            band = box.h / len(rules)
+            for index, line in enumerate(res.lines[:len(rules)]):
+                top = box.y + band * index
+                y = top + (band - size * 1.15) / 2
                 self._draw_line(draw, line, box.right - pad_x, y, font, color)
         else:
             step = size * cfg["line_gap"]
