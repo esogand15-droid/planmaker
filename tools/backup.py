@@ -5,7 +5,9 @@
     python -m tools.backup --status             # schedule, next run, history
     python -m tools.backup --list               # archives on disk
     python -m tools.backup --send 123456789     # create AND send it to a chat
-    python -m tools.backup --restore-info a.tar.gz   # what is inside an archive
+    python -m tools.backup --inspect a.tar.gz        # what restoring it would do
+    python -m tools.backup --restore a.tar.gz        # restore it (no Telegram)
+    python -m tools.backup --restore-info a.tar.gz   # dump README + metadata
 
 No Telegram traffic unless `--send` is used; the bot's automatic backups are
 configured in the admin panel (🛠 پنل مدیریت → 🧰 بکاپ‌گیری).
@@ -20,6 +22,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+from aiogram import Bot  # noqa: E402
 
 from app.config import settings  # noqa: E402
 from app.db.session import dispose_engine, init_engine, session_scope, wait_for_database  # noqa: E402
@@ -131,6 +135,117 @@ def _list_archives() -> int:
     return 0
 
 
+async def _inspect(path: str) -> int:
+    """Print exactly what restoring this archive would change — no writes."""
+    from app.services.restore import RestoreService, plan_summary
+
+    try:
+        plan = await RestoreService().inspect(path)
+    except Exception as exc:
+        print(f"✖ {exc}", file=sys.stderr)
+        return 1
+    summary = plan_summary(plan)
+    print(f"file      : {summary['filename']}  ({summary['size']})")
+    print(f"created   : {summary['created_jalali']} · {summary['created_utc']}")
+    print(f"app       : {summary['app_version']} · engine={summary['engine']} · "
+          f"dialect={summary['dialect']}")
+    print(f"contents  : {summary['tables']} tables · {summary['rows']} rows")
+    print(f"revision  : {summary['revision'] or '—'}")
+    print(f"sha256    : {summary['sha256']}")
+    print(f"restore   : {summary['executor']} · {summary['script']}")
+    print(f"excluded  : {', '.join(summary['excluded']) or '—'}")
+    print("─" * 62)
+    print(f"{'table':<26}{'now':>8}{'backup':>9}{'Δ':>7}")
+    for row in summary["deltas"]:
+        now = "—" if row["now"] is None else str(row["now"])
+        backup = "—" if row["backup"] is None else str(row["backup"])
+        delta = "" if row["delta"] is None else f"{row['delta']:+d}"
+        print(f"{row['table']:<26}{now:>8}{backup:>9}{delta:>7}")
+    for warning in summary["warnings"]:
+        print(f"⚠ {warning}")
+    if summary["fatal"]:
+        print(f"\n⛔ refused: {summary['fatal']}")
+        return 1
+    print("\n✔ the archive can be restored")
+    return 0
+
+
+async def _restore(path: str, *, send: bool = False, confirm: bool = True) -> int:
+    """Restore the live database from an archive. Same code path as the panel."""
+    from app.services.restore import RestoreError, RestoreService, TABLE_FA
+
+    service = RestoreService()
+    try:
+        plan = await service.inspect(path)
+    except RestoreError as exc:
+        print(f"✖ {exc}", file=sys.stderr)
+        return 1
+    if plan.fatal:
+        print(f"⛔ {plan.fatal}", file=sys.stderr)
+        return 1
+
+    print(f"archive   : {plan.path.name} · {plan.rows} rows · {plan.app_version}")
+    print(f"executor  : {plan.executor} ({plan.script})")
+    for warning in plan.warnings:
+        print(f"⚠ {warning}")
+    if not confirm:
+        print("▶ --yes given: restoring without asking")
+    else:
+        answer = input("▶ this REPLACES every row in the live database. "
+                       "type 'RESTORE' to continue: ").strip()
+        if answer != "RESTORE":
+            print("cancelled — nothing was changed")
+            return 1
+
+    async def progress(stage: str) -> None:
+        print(f"  … {stage}")
+
+    result = await service.restore(plan.path, actor_id=None, progress=progress)
+    if result.safety_backup is not None:
+        print(f"🛟 pre-restore backup: {result.safety_backup.path}")
+    if not result.ok:
+        print(f"✖ restore failed: {result.error}", file=sys.stderr)
+        print("  the load runs in one transaction — the database is unchanged")
+        return 1
+
+    print(f"✔ restored in {result.duration_ms} ms via {result.executor}")
+    print(f"  revision: {result.revision_after or plan.revision or '—'}"
+          + (" (migrations applied)" if result.migrated else ""))
+    for table, count in sorted(result.verified.items()):
+        expected = plan.archive_counts.get(table)
+        flag = "✔" if expected in (None, count) else "✖"
+        label = TABLE_FA.get(table, table)
+        print(f"  {flag} {table:<22}{count:>7} rows   ({label})")
+    for mismatch in result.mismatches:
+        print(f"  ⚠ {mismatch}")
+
+    if send and settings.bot_token:
+        bot = Bot(settings.bot_token)
+        try:
+            code = await _send_to_admins(bot, result)
+        finally:
+            await bot.session.close()
+        return code
+    return 0
+
+
+async def _send_to_admins(bot, result) -> int:
+    """Hand the pre-restore archive to the admins (it is the way back)."""
+    from app.services.backup import backup_caption, deliver
+
+    if result.safety_backup is None:
+        return 0
+    chat_ids = list(dict.fromkeys(settings.admin_ids))
+    if not chat_ids:
+        print("⚠ ADMIN_IDS is empty — the pre-restore backup stayed on disk")
+        return 0
+    ok, failed = await deliver(
+        bot, result.safety_backup, chat_ids,
+        backup_caption(result.safety_backup, auto=False))
+    print(f"🛟 pre-restore backup sent to {ok}" + (f" · failed {failed}" if failed else ""))
+    return 0
+
+
 def _restore_info(archive: str) -> int:
     path = Path(archive)
     if not path.exists():
@@ -160,7 +275,15 @@ def main() -> int:
                         metavar="CHAT_ID", help="also send the archive to this chat")
     parser.add_argument("--status", action="store_true", help="show settings + history")
     parser.add_argument("--list", action="store_true", help="list archives on disk")
-    parser.add_argument("--restore-info", metavar="ARCHIVE", help="inspect an archive")
+    parser.add_argument("--restore-info", metavar="ARCHIVE", help="dump README + metadata")
+    parser.add_argument("--inspect", metavar="ARCHIVE",
+                        help="show what restoring this archive would change")
+    parser.add_argument("--restore", metavar="ARCHIVE",
+                        help="restore the live database from this archive")
+    parser.add_argument("--yes", action="store_true",
+                        help="with --restore: do not ask for the RESTORE confirmation")
+    parser.add_argument("--send-safety", action="store_true",
+                        help="with --restore: also send the pre-restore backup to ADMIN_IDS")
     args = parser.parse_args()
 
     setup_logging()
@@ -173,6 +296,13 @@ def main() -> int:
         init_engine()
         await wait_for_database()
         try:
+            if args.inspect:
+                return await _inspect(args.inspect)
+            if args.restore:
+                # the restore closes and rebuilds the engine itself
+                code = await _restore(args.restore, send=args.send_safety,
+                                      confirm=not args.yes)
+                return code
             if args.status:
                 return await _status()
             if args.send:

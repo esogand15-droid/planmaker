@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # Startup sequence: verify runtime → migrate → run.
-# Usage: ./docker-entrypoint.sh [bot|migrate|doctor|backup|shell|smoke]
+# Usage: ./docker-entrypoint.sh [bot|migrate|doctor|backup|restore|shell|smoke]
 set -e
 
 echo "▶ Rotbe Land weekly planner · $(date -u +%FT%TZ)"
@@ -43,6 +43,11 @@ case "$MODE" in
     ;;
   backup)
     # one archive in $BACKUP_DIR, no Telegram traffic (the bot does that itself)
+    exec python -m tools.backup "${@:2}"
+    ;;
+  restore)
+    # ./docker-entrypoint.sh restore --inspect /data/backups/rotbeland-backup-….tar.gz
+    # ./docker-entrypoint.sh restore --restore  /data/backups/rotbeland-backup-….tar.gz
     exec python -m tools.backup "${@:2}"
     ;;
   shell)

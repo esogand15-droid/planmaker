@@ -7,13 +7,14 @@ student are rejected before a single query runs.
 from __future__ import annotations
 
 import logging
-
+import time
+import uuid
 from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, FSInputFile
+from aiogram.types import CallbackQuery, FSInputFile, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...config import settings
@@ -27,7 +28,22 @@ from ...domain.persian import (
 )
 from ...security import is_admin
 from ...services.admin_service import AdminService, uptime
-from ...services.backup import BackupService, human_bytes, next_run
+from ...services.backup import (
+    BackupService,
+    _now_utc,
+    deliver,
+    human_bytes,
+    next_run,
+)
+from ...services.restore import (
+    KEY_TABLES,
+    MAX_RESTORE_BYTES,
+    TABLE_FA,
+    RestoreError,
+    RestorePlan,
+    RestoreResult,
+    RestoreService,
+)
 from ...services.deletion import DeletionService
 from ...services.plan_manager import PlanManager, StudentError
 from ...services.render_queue import RenderQueue
@@ -48,6 +64,10 @@ class AdminFlow(StatesGroup):
     edit_student = State()
     search_advisor = State()
     search_student = State()
+    #: restore from an uploaded archive: waiting for the file …
+    backup_restore_file = State()
+    #: … then waiting for the explicit «yes, replace everything» tap
+    backup_restore_confirm = State()
 
 
 def status_of(user: User) -> str:
@@ -1740,3 +1760,377 @@ async def admin_backup_history(
         )
     await _edit(cq, "\n".join(lines), kb.admin_backup_history(callback_data.page))
     await _answer(cq)
+
+
+# ═══════════════════════ restore from an uploaded archive ═══════════════════
+#: a second restore while one is running would race the same tables; the flag is
+#: per-process, and the PostgreSQL advisory lock covers the multi-replica case
+_restore_running = False
+
+
+def _restore_root() -> Path:
+    """Where uploaded archives are staged — inside BACKUP_DIR so one volume
+    holds everything an operator may need after a disaster."""
+    root = Path(settings.backup_dir) / "restore"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _stage_upload(name: str) -> tuple[str, Path]:
+    """Create `restore/<id>/<name>` and return (id, path).
+
+    The id is what travels inside the confirmation button (Telegram caps
+    callback_data at 64 bytes), so it has to stay short while the original file
+    name — which carries the backup timestamp — is preserved on disk.
+    """
+    restore_id = uuid.uuid4().hex[:12]
+    safe = Path(name or "backup.tar.gz").name.replace("..", "_")[:100] or "backup.tar.gz"
+    folder = _restore_root() / restore_id
+    folder.mkdir(parents=True, exist_ok=True)
+    return restore_id, folder / safe
+
+
+def _drop_staged(path: Path | str | None) -> None:
+    """Remove a staged upload (and its folder) once it is no longer needed."""
+    if not path:
+        return
+    target = Path(str(path))
+    target.unlink(missing_ok=True)
+    parent = target.parent
+    if parent.name and parent.parent == _restore_root():
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
+
+
+def _delta_lines(plan: RestorePlan) -> str:
+    """«current ⟵ from backup» per table, for the confirmation screen."""
+    out: list[str] = []
+    for delta in plan.deltas():
+        now = "—" if delta.now is None else fa(delta.now)
+        backup = "—" if delta.backup is None else fa(delta.backup)
+        if delta.delta is None:
+            icon = "❔"
+            change = ""
+        elif delta.delta > 0:
+            icon, change = "➕", f" (+{fa(delta.delta)})"
+        elif delta.delta < 0:
+            icon, change = "➖", f" ({fa(delta.delta)})"
+        else:
+            icon, change = "🟰", ""
+        out.append(T.ADMIN_RESTORE_TABLE_ROW.format(
+            icon=icon, label=delta.label, now=now, backup=backup, delta=change))
+    return "".join(out) or "—\n"
+
+
+def _verified_lines(result: RestoreResult) -> str:
+    counts = result.verified or {}
+    shown = [
+        f"• {TABLE_FA.get(name, name)}: {fa(value)}"
+        for name, value in counts.items()
+        if name in KEY_TABLES or value
+    ]
+    return "\n".join(shown[:12]) or "—"
+
+
+def _warning_lines(warnings: list[str], template: str) -> str:
+    return "".join(template.format(text=text[:200]) for text in warnings[:6])
+
+
+async def _send_safety_backup(bot, result: RestoreResult, chat_ids: list[int]) -> str:
+    """The pre-restore archive is the only way back — hand it to the admins."""
+    safety = result.safety_backup
+    if safety is None:
+        return ""
+    caption = T.BACKUP_CAPTION_SAFETY.format(when=jalali_datetime(_now_utc()))
+    delivered: list[int] = []
+    if chat_ids:
+        try:
+            delivered, _failed = await deliver(bot, safety, chat_ids, caption)
+        except Exception as exc:  # pragma: no cover - Telegram outage
+            log.warning("could not send the pre-restore backup: %s", exc)
+    if delivered:
+        return T.ADMIN_RESTORE_SAFETY_SENT.format(
+            filename=safety.filename, size=human_bytes(safety.size_bytes))
+    return T.ADMIN_RESTORE_SAFETY_KEPT.format(
+        filename=safety.filename, size=human_bytes(safety.size_bytes), path=safety.path)
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_restore"))
+async def admin_backup_restore_prompt(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    state: FSMContext, user: User | None = None,
+) -> None:
+    """Step 1 — ask for the archive and explain what will be checked."""
+    _guard(cq, user)
+    if _restore_running:
+        await _answer(cq, T.ADMIN_RESTORE_IN_PROGRESS, show_alert=True)
+        return
+    await state.set_state(AdminFlow.backup_restore_file)
+    await state.update_data(restore_path=None)
+    await _edit(
+        cq,
+        T.ADMIN_RESTORE_UPLOAD.format(max_size=human_bytes(MAX_RESTORE_BYTES)),
+        kb.admin_backup_restore(),
+    )
+    await _answer(cq)
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_restore_cancel"))
+async def admin_backup_restore_cancel(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    state: FSMContext, user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    data = await state.get_data()
+    await state.clear()
+    _drop_staged(data.get("restore_path"))
+    await service_audit(session, "restore.cancelled", user)
+    await session.commit()
+    await _answer(cq, T.ADMIN_RESTORE_CANCELLED, show_alert=True)
+    await _render_backup_panel(cq, session, user)
+
+
+@router.message(AdminFlow.backup_restore_file, F.document)
+async def admin_backup_restore_upload(
+    message: Message, state: FSMContext, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    """Step 2 — download, validate and show exactly what would change."""
+    if not is_admin(user, message.from_user.id if message.from_user else None):
+        await state.clear()
+        await message.answer(T.ADMIN_ONLY, parse_mode="HTML")
+        return
+
+    document = message.document
+    name = (document.file_name or "backup.tar.gz").replace("/", "_").replace("..", "_")
+    size = document.file_size or 0
+    if size > MAX_RESTORE_BYTES:
+        await message.answer(
+            T.ADMIN_RESTORE_TOO_BIG.format(
+                size=human_bytes(size), max_size=human_bytes(MAX_RESTORE_BYTES)),
+            parse_mode="HTML",
+            reply_markup=kb.admin_backup_restore(),
+        )
+        return
+
+    notice = await message.answer(
+        "⏳ در حال دریافت و بررسی فایل بکاپ…", parse_mode="HTML")
+    restore_id, target = _stage_upload(name)
+    try:
+        # aiogram 3 downloads through the bot (`Bot.download` resolves the
+        # file_id via getFile and streams it); there is no `Document.download`
+        await cq_bot_download(message.bot, document, target)
+    except Exception as exc:
+        log.warning("restore upload download failed: %s", exc)
+        _drop_staged(target)
+        await _replace_notice(
+            notice,
+            T.ADMIN_RESTORE_DOWNLOAD_FAILED.format(reason=str(exc)[:200]),
+            kb.admin_backup_restore(),
+        )
+        return
+
+    service = RestoreService()
+    try:
+        plan = await service.inspect(target)
+    except RestoreError as exc:
+        _drop_staged(target)
+        await _replace_notice(
+            notice, T.ADMIN_RESTORE_BAD_FILE.format(reason=str(exc)),
+            kb.admin_backup_restore())
+        return
+    except Exception:
+        _drop_staged(target)
+        log.exception("restore inspection crashed")
+        await _replace_notice(
+            notice, T.ADMIN_RESTORE_BAD_FILE.format(reason="خطای داخلی — لاگ‌ها را ببینید"),
+            kb.admin_backup_restore())
+        return
+
+    if plan.fatal:
+        # nothing will be restored, so do not leave the upload on disk either
+        _drop_staged(target)
+        await _replace_notice(
+            notice, T.ADMIN_RESTORE_FATAL.format(reason=plan.fatal),
+            kb.admin_backup_restore())
+        await service_audit(session, "restore.inspected", user,
+                            f"rejected {plan.path.name}: {plan.fatal[:200]}")
+        await session.commit()
+        return
+
+    await state.set_state(AdminFlow.backup_restore_confirm)
+    await state.update_data(restore_path=str(target), restore_id=restore_id)
+    await service_audit(
+        session, "restore.inspected", user,
+        f"{plan.path.name} sha256={plan.sha256[:16]} rows={plan.rows} "
+        f"revision={plan.revision or '—'} executor={plan.executor}",
+    )
+    await session.commit()
+
+    now_rows = sum(value for key, value in plan.now_counts.items()
+                   if key in KEY_TABLES)
+    await _replace_notice(
+        notice,
+        T.ADMIN_RESTORE_SUMMARY.format(
+            filename=plan.path.name,
+            created=plan.created_jalali or plan.created_utc or "—",
+            version=plan.app_version,
+            dialect=plan.dialect,
+            engine=plan.engine,
+            tables=fa(plan.tables),
+            rows=fa(plan.rows),
+            size=human_bytes(plan.size_bytes),
+            revision=plan.revision or "—",
+            sha=plan.sha256[:32] + "…",
+            executor=plan.executor,
+            script=plan.script,
+            table=_delta_lines(plan),
+            warnings=_warning_lines(plan.warnings, T.ADMIN_RESTORE_WARNINGS),
+            now_rows=fa(now_rows),
+        ),
+        kb.admin_restore_confirm(restore_id),
+    )
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_restore_do"))
+async def admin_backup_restore_run(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    state: FSMContext, user: User | None = None,
+) -> None:
+    """Step 3 — wipe the live database and load the archive."""
+    global _restore_running
+
+    _guard(cq, user)
+    actor_id = user.id if user else None
+    telegram_id = cq.from_user.id if cq.from_user else None
+    if _restore_running:
+        await _answer(cq, T.ADMIN_RESTORE_IN_PROGRESS, show_alert=True)
+        return
+
+    data = await state.get_data()
+    staged = Path(str(data.get("restore_path") or ""))
+    if not str(staged) or not staged.exists():
+        await state.clear()
+        await _answer(cq, T.ADMIN_RESTORE_BAD_FILE.format(
+            reason="فایل موقت روی سرور موجود نیست؛ دوباره بفرستید."), show_alert=True)
+        return
+    if callback_data.arg and str(data.get("restore_id") or "") != callback_data.arg:
+        # the confirmation payload must match the staged upload — a stale button
+        # from another upload may not silently restore the wrong archive
+        await state.clear()
+        _drop_staged(staged)
+        await _answer(
+            cq,
+            T.ADMIN_RESTORE_BAD_FILE.format(
+                reason="این دکمه به فایل دیگری تعلق دارد؛ لطفاً بکاپ را دوباره بفرستید."),
+            show_alert=True,
+        )
+        return
+
+    await _answer(cq, "⏳ بازگردانی شروع شد…")
+    progress_message = await ui.edit_or_send(
+        cq, T.ADMIN_RESTORE_RUNNING.format(stage="در حال بررسی و آماده‌سازی…"),
+        kb.admin_back("backup"),
+    )
+    last_edit = time.monotonic()
+
+    async def progress(stage: str) -> None:
+        nonlocal last_edit
+        if progress_message is None or time.monotonic() - last_edit < 1.5:
+            return
+        last_edit = time.monotonic()
+        await ui.edit_or_send(
+            cq, T.ADMIN_RESTORE_RUNNING.format(stage=stage), kb.admin_back("backup"))
+
+    service = RestoreService()
+    _restore_running = True
+    try:
+        result = await service.restore(staged, actor_id=actor_id, progress=progress)
+    except RestoreError as exc:
+        await ui.edit_or_send(
+            cq, T.ADMIN_RESTORE_FAILED.format(reason=str(exc), safety=""),
+            kb.admin_back("backup"))
+        await state.clear()
+        return
+    except Exception as exc:
+        log.exception("restore failed")
+        await ui.edit_or_send(
+            cq,
+            T.ADMIN_RESTORE_FAILED.format(
+                reason=f"{type(exc).__name__}: {str(exc)[:200]}", safety=""),
+            kb.admin_back("backup"))
+        await state.clear()
+        return
+    finally:
+        _restore_running = False
+
+    # the middleware session is bound to an engine the restore disposed — drop it
+    try:
+        await session.close()
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    recipients = list(dict.fromkeys(
+        [telegram_id, *settings.admin_ids] if telegram_id else list(settings.admin_ids)
+    ))
+    safety_block = await _send_safety_backup(cq.bot, result, recipients)
+
+    if not result.ok:
+        body = T.ADMIN_RESTORE_FAILED.format(
+            reason=(result.error or "نامشخص")[:600], safety=safety_block)
+    else:
+        body = T.ADMIN_RESTORE_OK.format(
+            filename=result.plan.path.name,
+            created=result.plan.created_jalali or result.plan.created_utc or "—",
+            duration=f"{fa(round(result.duration_ms / 1000, 1))} ثانیه",
+            executor=result.executor,
+            revision=result.revision_after or result.plan.revision or "—",
+            migrated=" (مهاجرت‌ها اجرا شد)" if result.migrated else "",
+            rows=fa(result.plan.rows),
+            table=_verified_lines(result),
+            warnings=_warning_lines(
+                result.plan.warnings, T.ADMIN_RESTORE_WARNINGS)
+            + _warning_lines(result.mismatches, T.ADMIN_RESTORE_MISMATCH),
+            safety=safety_block,
+        )
+    await ui.edit_or_send(cq, body, kb.admin_back("backup"))
+    await state.clear()
+    _drop_staged(staged)
+    await _render_backup_panel(cq, session, user)
+
+
+async def cq_bot_download(bot, document, target: Path) -> None:
+    """Stream an uploaded document to `target`, refusing anything unexpected."""
+    if bot is None:
+        raise RestoreError("ربات در دسترس نیست.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    await bot.download(document, destination=str(target))
+    if not target.exists() or target.stat().st_size == 0:
+        target.unlink(missing_ok=True)
+        raise RestoreError("فایل دانلود شده خالی است.")
+
+
+async def _replace_notice(notice, text: str, markup=None) -> None:
+    """Turn the «receiving…» message into the real answer (never a new spam)."""
+    if notice is None:
+        return
+    try:
+        await notice.edit_text(text, reply_markup=markup, parse_mode="HTML")
+        return
+    except Exception as exc:
+        log.debug("could not edit the restore notice (%s) — sending a new one", exc)
+    try:
+        await notice.answer(text, reply_markup=markup, parse_mode="HTML")
+    except Exception as exc:  # pragma: no cover - chat went away
+        log.warning("could not report the restore result: %s", exc)
+
+
+async def service_audit(session: AsyncSession, action: str, user: User | None,
+                        detail: str | None = None) -> None:
+    """Audit helper for handlers that run outside a PlanManager."""
+    from ...repositories.repositories import AuditRepository
+
+    await AuditRepository(session).log(
+        action, actor_id=user.id if user else None, detail=detail)

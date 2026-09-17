@@ -6,7 +6,7 @@ everything needed to bring the system back:
     rotbeland-backup-1405-06-26_0315.tar.gz
     ├── README.txt              how to restore (Persian + English)
     ├── restore.sh              psql one-liner wrapper
-    ├── metadata.json           version, counts, sha256 of every member
+    ├── metadata.json           version, counts, sha256 of every payload member
     ├── checksums.txt           sha256 per member
     ├── sql/dump.sql            full, restorable SQL (schema + data + sequences)
     ├── sql/schema.sql          schema only
@@ -35,6 +35,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import tarfile
 import tempfile
@@ -63,7 +64,12 @@ SQL_DIRNAME = "sql"
 #: runtime bookkeeping of the backup feature itself — never part of a dump.
 #: (`bot_settings` holds the schedule, which lives in the environment too, and
 #: `backup_logs` would otherwise contain the row of the backup being taken.)
-EXCLUDED_TABLES = frozenset({"backup_logs", "bot_settings"})
+#: `backup_logs` is the history of the backup feature itself: dumping it makes
+#: every archive carry the record of all previous archives, and a restore would
+#: resurrect rows pointing at files that no longer exist. `bot_settings` *is*
+#: included — it holds the schedule/retention/recipients the admin configured in
+#: the panel, and losing it on restore would silently re-arm the defaults.
+EXCLUDED_TABLES = frozenset({"backup_logs"})
 
 #: PostgreSQL advisory-lock keys (arbitrary, stable, namespaced by hash)
 LOCK_KEY_BACKUP = 7_341_001
@@ -238,6 +244,32 @@ async def pg_dump_archive(out_dir: Path) -> tuple[Path, str]:
 
 
 # ══════════════════════════════════════════════════════════ engine: python ═
+#: `CREATE TABLE x (` → `CREATE TABLE IF NOT EXISTS x (`
+_RE_CREATE_TABLE = re.compile(r"\bCREATE\s+TABLE\s+(?!IF\s+NOT\s+EXISTS\b)", re.IGNORECASE)
+#: an unnamed index cannot use IF NOT EXISTS (PostgreSQL needs a name to compare)
+_RE_CREATE_INDEX = re.compile(
+    r"\bCREATE\s+(?P<kind>UNIQUE\s+)?INDEX\s+(?!IF\s+NOT\s+EXISTS\b)(?P<name>\S+)\s+ON",
+    re.IGNORECASE,
+)
+
+
+def idempotent_ddl(sql: str) -> str:
+    """Make generated DDL safe to run against a database that already has tables.
+
+    A backup is restored into *whatever* is running — an empty database, the
+    same database after a crash, or a brand-new one on another host. Without
+    `IF NOT EXISTS` the very first `CREATE TABLE` aborts the whole transaction
+    (`relation "users" already exists`) and nothing at all is restored.
+    """
+    sql = _RE_CREATE_TABLE.sub("CREATE TABLE IF NOT EXISTS ", sql)
+
+    def _index(match) -> str:
+        kind = (match.group("kind") or "").upper()
+        return f"CREATE {kind}INDEX IF NOT EXISTS {match.group('name')} ON"
+
+    return _RE_CREATE_INDEX.sub(_index, sql)
+
+
 def _compile_ddl(element, dialect) -> str:
     compiled = element.compile(dialect=dialect)
     return str(compiled).strip().rstrip(";") + ";"
@@ -337,12 +369,12 @@ async def python_dump(conn: AsyncConnection) -> dict:
         name = table.name
         quoted.append(dialect.identifier_preparer.format_table(table))
         try:
-            schema_parts.append(_compile_ddl(CreateTable(table), dialect))
+            schema_parts.append(idempotent_ddl(_compile_ddl(CreateTable(table), dialect)))
         except Exception as exc:  # pragma: no cover - exotic column types
             log.warning("could not compile DDL for %s: %s", name, exc)
         for index in sorted(table.indexes, key=lambda ix: ix.name or ""):
             try:
-                schema_parts.append(_compile_ddl(CreateIndex(index), dialect))
+                schema_parts.append(idempotent_ddl(_compile_ddl(CreateIndex(index), dialect)))
             except Exception:  # pragma: no cover
                 continue
 
@@ -452,7 +484,7 @@ async def python_dump(conn: AsyncConnection) -> dict:
         [
             header,
             *prelude,
-            "-- ── schema (created only when missing) ──",
+            "-- ── schema (IF NOT EXISTS → safe on a populated database) ──",
             *schema_parts,
             *clear,
             "-- ── data ──",
@@ -538,6 +570,8 @@ def _readme_text(meta: dict) -> str:
 رکوردها        : {meta['rows']}
 حجم آرشیو      : {meta['size']}
 sha256         : {meta['sha256']}
+                 (اگر این مقدار با sha256 خودِ فایل یکی نیست، آرشیو بعد از
+                  ساخته‌شدن دوباره بسته‌بندی شده است؛ ملاک، checksums.txt است.)
 
 محتویات
 -------
@@ -563,8 +597,11 @@ restore.sh        ← اجرای سریع بازگردانی با psql
 -------
 • dump.sql داده موجود را با TRUNCATE پاک می‌کند و سپس داده بکاپ را می‌ریزد؛
   یعنی بازگردانی روی پایگاه داده فعال = جایگزینی کامل داده.
-• جدول‌های bot_settings و backup_logs عمداً در بکاپ نیستند (تنظیمات زمان‌بندی
-  از متغیرهای محیطی بازسازی می‌شود و تاریخچه بکاپ بخشی از داده کاری نیست).
+• جدول bot_settings (تنظیمات زمان‌بندی/نگهداری/گیرندگان بکاپ) در آرشیو هست،
+  پس بعد از بازگردانی دقیقاً همان تنظیماتی می‌ماند که مدیر چیده بود.
+• جدول backup_logs (تاریخچه خودِ بکاپ‌ها) عمداً در آرشیو نیست.
+• ربات می‌تواند همین آرشیو را خودش بازگردانی کند: پنل مدیریت → بکاپ‌گیری →
+  «♻️ بازگردانی از فایل بکاپ» و ارسال فایل.
 • اگر pg_dump روی سرور نصب باشد، فایل sql/pgdump.dump هم داخل آرشیو است؛ در آن
   صورت بهترین راه بازگردانی این است:
      pg_restore --clean --if-exists --no-owner -d "$DATABASE_URL" sql/pgdump.dump
@@ -670,9 +707,7 @@ def package_backup(payload: dict, *, root: Path, stamp: str, pgdump: Path | None
 
         tmp_archive = archive.with_suffix(".tar.gz.tmp")
         with tarfile.open(tmp_archive, "w:gz", compresslevel=9) as tar:
-            for path in sorted(staging.rglob("*")):
-                if path.is_file():
-                    tar.add(path, arcname=f"{folder}/{path.relative_to(staging)}")
+            _pack_folder(tar, staging, folder)
         tmp_archive.replace(archive)
 
     digest = _sha256(archive.read_bytes())
@@ -683,9 +718,19 @@ def package_backup(payload: dict, *, root: Path, stamp: str, pgdump: Path | None
     meta["sha256"] = digest
     _rewrite_metadata(archive, folder, meta)
 
+    # Repacking changes the bytes, so an archive can never contain its own final
+    # digest (metadata.json is part of it). The digest that matters — the one an
+    # admin compares against a downloaded file and the one stored in
+    # `backup_logs` — is recomputed here, *after* the last write.
+    digest = _sha256(archive.read_bytes())
+    size = archive.stat().st_size
+    meta["sha256"] = digest
+    meta["size"] = human_bytes(size)
+
     log.info(
-        "backup created engine=%s tables=%s rows=%s size=%s path=%s",
-        meta["engine"], meta["tables"], total_rows, human_bytes(size), archive.name,
+        "backup created engine=%s tables=%s rows=%s size=%s sha256=%s path=%s",
+        meta["engine"], meta["tables"], total_rows, human_bytes(size), digest[:16],
+        archive.name,
     )
     return BackupArtifact(
         path=archive,
@@ -707,37 +752,83 @@ def _masked_dsn() -> str:
     return _mask_dsn(settings.database_url)
 
 
+def _tar_mode(relative_name: str) -> int:
+    """`restore.sh` must stay executable inside the archive.
+
+    `tar.add()` takes the mode from the staged file, and staging writes 0644 —
+    which silently turned the one-command restore script into something an
+    operator had to `chmod` first.
+    """
+    return 0o755 if relative_name.endswith(".sh") else 0o644
+
+
+def _pack_folder(tar: tarfile.TarFile, folder_root: Path, folder: str) -> None:
+    """Add every file under `folder_root` as `<folder>/<relative path>`."""
+    for path in sorted(folder_root.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(folder_root)
+        info = tar.gettarinfo(path, arcname=f"{folder}/{relative}")
+        info.mode = _tar_mode(str(relative))
+        info.uid = info.gid = 0
+        info.uname = info.gname = ""
+        with path.open("rb") as handle:
+            tar.addfile(info, handle)
+
+
 def _stage(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
 
 
+#: files whose content is *derived* from metadata.json. They are regenerated on
+#: every pack, so hashing them is meaningless — an archive cannot contain the
+#: hash of a file that embeds the archive's own size/digest.
+DERIVED_MEMBERS = ("README.txt", "metadata.json", "checksums.txt")
+
+
 def _rewrite_metadata(archive: Path, folder: str, meta: dict) -> None:
-    """Replace metadata.json/checksums.txt inside the archive in place."""
+    """Replace metadata.json/checksums.txt inside the archive in place.
+
+    Order matters and used to be wrong: README.txt is generated *from* the final
+    metadata, so it has to be written **before** the digests are computed. The
+    old order recorded the digest of the previous README, which made every
+    archive fail its own integrity check.
+    """
     with tempfile.TemporaryDirectory(prefix="rotbeland-repack-") as tmp:
         staging = Path(tmp)
         with tarfile.open(archive, "r:gz") as tar:
             tar.extractall(staging, filter="data")
+
+        # 1. regenerate the derived documents from the final metadata
+        meta.pop("members", None)
+        (staging / folder / "README.txt").write_bytes(_readme_text(meta).encode("utf-8"))
+
+        # 2. hash the payload members exactly as they will be packed
         members: dict[str, str] = {}
         for path in sorted((staging / folder).rglob("*")):
             if path.is_file():
                 rel = str(path.relative_to(staging / folder))
-                if rel in ("metadata.json", "checksums.txt"):
+                if rel in DERIVED_MEMBERS:
                     continue
                 members[rel] = _sha256(path.read_bytes())
         meta["members"] = members
+
+        # 3. now write the manifests that describe them
+        (staging / folder / "checksums.txt").write_bytes(
+            (
+                "# sha256 of every payload member of this archive.\n"
+                "# README.txt / metadata.json / checksums.txt are derived from\n"
+                "# metadata.json and are therefore not listed.\n"
+                + "".join(f"{digest}  {name}\n" for name, digest in sorted(members.items()))
+            ).encode("utf-8")
+        )
         (staging / folder / "metadata.json").write_bytes(
             json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
         )
-        (staging / folder / "checksums.txt").write_bytes(
-            ("".join(f"{digest}  {name}\n" for name, digest in sorted(members.items()))).encode("utf-8")
-        )
-        (staging / folder / "README.txt").write_bytes(_readme_text(meta).encode("utf-8"))
         tmp_archive = archive.with_suffix(".tar.gz.tmp")
         with tarfile.open(tmp_archive, "w:gz", compresslevel=9) as tar:
-            for path in sorted((staging / folder).rglob("*")):
-                if path.is_file():
-                    tar.add(path, arcname=f"{folder}/{path.relative_to(staging / folder)}")
+            _pack_folder(tar, staging / folder, folder)
         tmp_archive.replace(archive)
 
 

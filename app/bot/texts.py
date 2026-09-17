@@ -78,7 +78,9 @@ class AdminCB(CallbackData, prefix="ad"):
                          # | backup_sched | backup_set_sched | backup_hour
                          # | backup_set_hour | backup_day | backup_set_day
                          # | backup_interval | backup_set_interval
-                         # | backup_keep | backup_set_keep
+                         # | backup_keep | backup_set_keep | backup_history
+                         # | backup_restore | backup_restore_do
+                         # | backup_restore_cancel
     ref: int = 0
     page: int = 0
     arg: str = ""
@@ -354,6 +356,12 @@ AUDIT_ACTIONS_FA = {
     "backup.interval_changed": "تغییر فاصله بکاپ",
     "backup.retention_changed": "تغییر تعداد نسخه نگهداری",
     "backup.recipients_changed": "تغییر گیرندگان بکاپ",
+    "restore.inspected": "بررسی فایل بکاپ",
+    "restore.started": "شروع بازگردانی از بکاپ",
+    "restore.completed": "بازگردانی موفق",
+    "restore.completed_with_diff": "بازگردانی با تفاوت جزئی",
+    "restore.failed": "بازگردانی ناموفق",
+    "restore.cancelled": "لغو بازگردانی",
 }
 
 
@@ -572,6 +580,14 @@ NOT_REGISTERED = (
     "برای استفاده، از مشاور خود بخواهید لینک دعوت شما را بفرستد."
 )
 UNKNOWN_ACTION = "این دکمه دیگر معتبر نیست. لطفاً از /start دوباره شروع کنید."
+UNKNOWN_MESSAGE = (
+    "🤔 این پیام ({kind}) در این مرحله معنایی برای ربات نداشت.\n\n"
+    "• برای منوی اصلی: <code>/start</code>\n"
+    "• برای بازگردانی پایگاه داده از فایل بکاپ: پنل مدیریت ← 🧰 بکاپ‌گیری ← "
+    "♻️ بازگردانی از فایل بکاپ، و بعد ارسال همان فایل <code>.tar.gz</code>\n"
+    "• داخل ویرایش خانه‌های برنامه، قالب سریع را بفرستید:\n"
+    "  <code>زیست | گوارش | ۴۰ تست | ۹۰ دقیقه</code>"
+)
 SEARCH_PROMPT = "🔎 نام دانش‌آموز را بنویسید:"
 CHOOSE_WEEK = (
     "📅 <b>انتخاب هفته</b>\n\n"
@@ -814,6 +830,100 @@ SENT_OK_NO_PDF = (
 PREVIEW_UNDELIVERED = (
     "⚠️ پیش‌نمایش به‌صورت عکس ارسال نشد؛ از دکمه‌های زیر ادامه دهید."
 )
+
+# ── بازگردانی از فایل بکاپ ──────────────────────────────────────────────────
+ADMIN_RESTORE_UPLOAD = (
+    "♻️ <b>بازگردانی پایگاه داده از فایل بکاپ</b>\n\n"
+    "همان فایل <code>.tar.gz</code> را که ربات برایتان فرستاده (یا از سرور "
+    "برداشته‌اید) همین‌جا بفرستید.\n\n"
+    "ربات پیش از هر کاری فایل را کامل بررسی می‌کند:\n"
+    "• بکاپِ خودِ همین ربات باشد\n"
+    "• sha256 همه اعضا با <code>checksums.txt</code> یکی باشد\n"
+    "• با نوع پایگاه داده فعلی سازگار باشد\n"
+    "• از نسخه جدیدتری نسبت به کد نصب‌شده نباشد\n\n"
+    "سپس <b>گزارش دقیق آنچه جایگزین می‌شود</b> را نشان می‌دهد و تا تأیید شما "
+    "هیچ تغییری نمی‌دهد.\n\n"
+    "📌 حداکثر حجم: {max_size}"
+)
+ADMIN_RESTORE_BAD_FILE = (
+    "⚠️ این فایل بکاپ معتبر نیست:\n{reason}\n\n"
+    "فایل <code>rotbeland-backup-….tar.gz</code> که ربات ساخته را بفرستید."
+)
+ADMIN_RESTORE_TOO_BIG = (
+    "⚠️ حجم فایل {size} است و از سقف مجاز ({max_size}) بیشتر است.\n"
+    "آرشیو را روی سرور بگذارید و از خط فرمان بازگردانی کنید:\n"
+    "<code>python -m tools.backup --restore &lt;path&gt;</code>"
+)
+ADMIN_RESTORE_DOWNLOAD_FAILED = "⚠️ دانلود فایل از تلگرام ناموفق بود: {reason}"
+ADMIN_RESTORE_SUMMARY = (
+    "♻️ <b>گزارش بکاپ دریافتی</b>\n\n"
+    "📦 فایل: <code>{filename}</code>\n"
+    "🕐 تاریخ بکاپ: {created}\n"
+    "🧬 نسخه ربات هنگام بکاپ: {version}\n"
+    "🗄 پایگاه داده بکاپ: {dialect} · موتور: {engine}\n"
+    "📊 {tables} جدول · {rows} رکورد · {size}\n"
+    "🔖 revision: <code>{revision}</code>\n"
+    "🧪 sha256: <code>{sha}</code>\n"
+    "🛠 روش اجرا: {executor} ({script})\n\n"
+    "<b>وضعیت فعلی ⟵ آنچه از بکاپ جایگزین می‌شود</b>\n{table}\n\n"
+    "{warnings}"
+    "⚠️ <b>هشدار:</b> همه داده‌های فعلی ({now_rows} رکورد در این جدول‌ها) پاک و "
+    "داده بکاپ جایگزین می‌شود — کاربران، مشاوران، دانش‌آموزان، برنامه‌ها، "
+    "تکالیف، دعوت‌ها و لاگ رویدادها.\n"
+    "پیش از بازگردانی، یک بکاپ اطمینان از وضعیت فعلی گرفته و برایتان ارسال "
+    "می‌شود.\n"
+    "تنظیمات بکاپ (زمان‌بندی/نگهداری/گیرندگان) از خودِ بکاپ بازمی‌گردد.\n\n"
+    "این کار قابل بازگشت است (از همان بکاپ اطمینان) ولی داده‌های فعلی را "
+    "از بین می‌برد. ادامه می‌دهید؟"
+)
+ADMIN_RESTORE_FATAL = (
+    "⛔️ این بکاپ قابل بازگردانی نیست:\n{reason}\n\n"
+    "هیچ تغییری در پایگاه داده داده نشد."
+)
+ADMIN_RESTORE_WARNINGS = "⚠️ {text}\n"
+ADMIN_RESTORE_RUNNING = (
+    "⏳ <b>بازگردانی در حال اجراست…</b>\n\n"
+    "{stage}\n\n"
+    "ربات تا پایان کار پاسخ دیگری نمی‌دهد؛ لطفاً چیزی نفرستید."
+)
+ADMIN_RESTORE_OK = (
+    "✅ <b>بازگردانی با موفقیت انجام شد</b>\n\n"
+    "📦 از: <code>{filename}</code>\n"
+    "🕐 بکاپِ: {created}\n"
+    "⏱ زمان اجرا: {duration}\n"
+    "🛠 روش: {executor}\n"
+    "🔖 revision: <code>{revision}</code>{migrated}\n"
+    "📊 رکوردهای بازیابی‌شده: {rows}\n\n"
+    "<b>تعداد رکوردها بعد از بازگردانی</b>\n{table}\n\n"
+    "{warnings}"
+    "{safety}"
+    "🖼 فایل‌های تصویری/PDF برنامه‌ها با «تولید برنامه» از همین داده دوباره "
+    "ساخته می‌شوند.\n"
+    "اگر تنظیمات ربات عوض شده، یک بار ربات را ری‌استارت کنید."
+)
+ADMIN_RESTORE_FAILED = (
+    "❌ <b>بازگردانی ناموفق بود</b>\n\n"
+    "{reason}\n\n"
+    "بارگذاری داخل یک تراکنش انجام می‌شود، بنابراین پایگاه داده دقیقاً همان "
+    "وضعیت قبلی را دارد و هیچ داده‌ای از بین نرفته است.\n"
+    "{safety}"
+    "🩺 برای تشخیص: <code>python -m tools.manage doctor</code>"
+)
+ADMIN_RESTORE_MISMATCH = "⚠️ تفاوت در بررسی: {text}\n"
+ADMIN_RESTORE_SAFETY_SENT = (
+    "🛟 بکاپ اطمینان (وضعیت قبل از بازگردانی): <code>{filename}</code> · {size}\n"
+    "به‌صورت فایل برایتان ارسال شد؛ در تلگرام نگهش دارید.\n"
+)
+ADMIN_RESTORE_SAFETY_KEPT = (
+    "🛟 بکاپ اطمینان (وضعیت قبل از بازگردانی): <code>{filename}</code> · {size}\n"
+    "مسیر: <code>{path}</code>\n"
+)
+BACKUP_CAPTION_SAFETY = "🛟 بکاپ اطمینان · قبل از بازگردانی {when}"
+ADMIN_RESTORE_CANCELLED = "↩️ بازگردانی لغو شد؛ پایگاه داده دست‌نخورده باقی ماند."
+ADMIN_RESTORE_IN_PROGRESS = (
+    "⏳ یک بازگردانی در جریان است. تا پایان آن صبر کنید."
+)
+ADMIN_RESTORE_TABLE_ROW = "{icon} {label}: {now} ⟵ {backup}{delta}\n"
 
 BACKUP_CAPTION_MANUAL = "🗄 بکاپ دستی پایگاه داده · {when}"
 

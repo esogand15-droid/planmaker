@@ -1,40 +1,50 @@
-Rotbe Land weekly planner · v1.4.0 — only the changed/new files
-Extract at the repository root; every path is identical to the repo.
-Excluded on request: tests/* and *.md (except DEPLOY.md).
+فهرست فایل‌های نهایی — رتبه لند v1.4.0 (بکاپ خودکار/دستی + ♻️ بازگردانی از بکاپ + ۱۲ باگ اصلاح‌شده)
+================================================================================
+این ZIP فقط شامل فایل‌هایی است که تغییر کرده یا اضافه شده‌اند؛ ساختار پوشه‌ها
+دقیقاً مثل مخزن است. محتوا را روی ریشه پروژه کپی کنید (overwrite) و بعد:
 
-sha256/12    bytes  path
-281f1f1f08ab     1505  .dockerignore
-97664cdd4909     5093  .env.example
-0a5ef7705d2b     2571  .github/workflows/ci.yml
-22e088600ad1     1713  .gitignore
-f9159586d096    14125  DEPLOY.md
-aea408f8c6c9     2168  Dockerfile
-d774a852e0ba      279  Procfile
-78b591400c56        6  VERSION
-82711211978f       97  app/__init__.py
-baa38a322dc6    66275  app/bot/handlers/admin.py
-5ccf5391a801    54411  app/bot/handlers/advisor.py
-030f5b3a3d03     8197  app/bot/handlers/common.py
-21ebed71ec58     1283  app/bot/handlers/fallback.py
-68c1691b396c     2695  app/bot/handlers/student.py
-5813868f1799    43987  app/bot/keyboards.py
-028eaefbf5e8     8018  app/bot/main.py
-9bcc3088a179     9868  app/bot/middlewares.py
-d85c37232268      952  app/bot/states.py
-0c6e6bbe2cd9    38383  app/bot/texts.py
-3b492bf6249d     8214  app/bot/ui.py
-8a5594b53917     8005  app/config.py
-4bbd81e2d743     9777  app/db/bootstrap.py
-6f900676bc43    15481  app/db/models.py
-dc02ad24e0a3     3818  app/db/session.py
-40e1f956376f     3266  app/domain/persian.py
-ab613bd5b47c    11397  app/rendering/html_renderer.py
-68f3905c5473    26127  app/repositories/repositories.py
-5f6aa519abe8    55267  app/services/backup.py
-b9e37f56dd61     9223  app/services/plan_service.py
-114397c4dac1     1546  docker-compose.yml
-101dc853da81     2110  docker-entrypoint.sh
-39e391def8e5     3274  migrations/versions/c1f4b7d20a11_backup_and_bot_settings.py
-1d509ef47de4     1050  railway.toml
-8e78fbf651e6     7536  tools/backup.py
-230dad95a651    10291  tools/manage.py
+    pip install -r requirements.txt
+    python -m tools.manage doctor
+    python -m tools.backup --status
+    python -m tools.backup --inspect backups/<archive>.tar.gz
+
+سپس سرویس را ری‌استارت کنید (RUN_MIGRATIONS_ON_START=true مهاجرت جدید را می‌زند).
+
+تعداد فایل‌ها: 36
+
+.dockerignore
+.env.example
+.gitignore
+/home/user/planmaker/.github/workflows/ci.yml
+DEPLOY.md
+Dockerfile
+Procfile
+VERSION
+app/__init__.py
+app/bot/handlers/admin.py
+app/bot/handlers/advisor.py
+app/bot/handlers/common.py
+app/bot/handlers/fallback.py
+app/bot/handlers/student.py
+app/bot/keyboards.py
+app/bot/main.py
+app/bot/middlewares.py
+app/bot/states.py
+app/bot/texts.py
+app/bot/ui.py
+app/config.py
+app/db/bootstrap.py
+app/db/models.py
+app/db/session.py
+app/domain/persian.py
+app/rendering/html_renderer.py
+app/repositories/repositories.py
+app/services/backup.py
+app/services/plan_service.py
+app/services/restore.py
+docker-compose.yml
+docker-entrypoint.sh
+migrations/versions/c1f4b7d20a11_backup_and_bot_settings.py
+railway.toml
+tools/backup.py
+tools/manage.py

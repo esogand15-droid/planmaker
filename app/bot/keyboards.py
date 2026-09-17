@@ -971,6 +971,11 @@ def admin_backup(row, *, last_ok: bool, has_file: bool) -> InlineKeyboardMarkup:
         callback_data=AdminCB(action="backup_keep").pack()),
         InlineKeyboardButton(
         text="🧾 تاریخچه", callback_data=AdminCB(action="backup_history").pack()))
+    # restoring is destructive, so it sits apart from the everyday buttons and
+    # always goes through a summary + an explicit confirmation
+    kb.row(InlineKeyboardButton(
+        text="♻️ بازگردانی از فایل بکاپ",
+        callback_data=AdminCB(action="backup_restore").pack()))
     if last_ok and has_file:
         kb.row(InlineKeyboardButton(
             text="📬 ارسال مجدد آخرین بکاپ",
@@ -1059,4 +1064,33 @@ def admin_backup_history(page: int = 0) -> InlineKeyboardMarkup:
         text="⬅️ بخش بکاپ", callback_data=AdminCB(action="backup").pack()),
         InlineKeyboardButton(
         text="🛠 پنل مدیریت", callback_data=AdminCB(action="home").pack()))
+    return kb.as_markup()
+
+
+def admin_backup_restore() -> InlineKeyboardMarkup:
+    """Shown while the bot waits for the admin to upload an archive."""
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(
+        text="❌ لغو", callback_data=AdminCB(action="backup_restore_cancel").pack()))
+    kb.row(InlineKeyboardButton(
+        text="⬅️ بازگشت به بکاپ‌گیری", callback_data=AdminCB(action="backup").pack()))
+    return kb.as_markup()
+
+
+def admin_restore_confirm(restore_id: str) -> InlineKeyboardMarkup:
+    """The irreversible step.
+
+    `callback_data` is capped at 64 bytes and an archive name alone can eat that
+    budget, so the payload carries only a short `restore_id`. The staged path
+    lives in the FSM state and the handler re-checks that the two still belong
+    together — a stale button from an earlier upload must never restore a
+    different file.
+    """
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(
+        text="✅ بله، پایگاه داده را بازگردانی کن",
+        callback_data=AdminCB(action="backup_restore_do", arg=restore_id[:20]).pack()))
+    kb.row(InlineKeyboardButton(
+        text="❌ لغو — دست نزن",
+        callback_data=AdminCB(action="backup_restore_cancel").pack()))
     return kb.as_markup()
