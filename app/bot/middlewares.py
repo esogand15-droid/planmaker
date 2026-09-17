@@ -169,10 +169,58 @@ class ErrorMiddleware(BaseMiddleware):
             await _reply(event, str(exc) or T.ACCESS_DENIED)
         except PlanGenerationError as exc:
             await _reply(event, f"⚠️ {exc}")
-        except Exception:
+        except Exception as exc:
+            if _is_missing_schema(exc):
+                # The database is reachable but empty: migrations never ran.
+                # A generic "try again" message would send every user into a
+                # retry loop forever, so say exactly what is wrong.
+                log.critical(
+                    "database schema is missing (%s) — run `alembic upgrade head` "
+                    "or restart the service so the bootstrap can migrate it",
+                    _schema_detail(exc),
+                )
+                await _reply(event, T.SCHEMA_MISSING)
+                return None
             log.exception("unhandled error in handler; update=%r", event)
             await _reply(event, T.GENERIC_ERROR)
         return None
+
+
+def _schema_detail(exc: BaseException) -> str:
+    """The underlying driver message, if the exception was wrapped by SQLAlchemy."""
+    seen: list[str] = []
+    current: BaseException | None = exc
+    for _ in range(6):
+        if current is None:
+            break
+        seen.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+    return " | ".join(seen)[:500]
+
+
+def _is_missing_schema(exc: BaseException) -> bool:
+    """True when the failure is `relation ... does not exist` (empty database)."""
+    markers = ("undefinedtable", 'does not exist', "no such table")
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    for _ in range(6):
+        if current is None:
+            break
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    for item in chain:
+        name = type(item).__name__.lower()
+        text = str(item).lower()
+        if "undefinedtable" in name:
+            return True
+        if "no such table" in text:
+            return True
+        if "does not exist" in text and ("relation" in text or "table" in text):
+            return True
+        if "undefinedtable" in text:
+            return True
+    del markers
+    return False
 
 
 def _visitor_message(request) -> str:

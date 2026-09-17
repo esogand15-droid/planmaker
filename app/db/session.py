@@ -85,6 +85,17 @@ async def create_all(engine: AsyncEngine | None = None) -> None:
         await conn.run_sync(Base.metadata.create_all)
 
 
+async def ensure_schema(engine: AsyncEngine | None = None) -> dict:
+    """Migrate (and if needed self-heal) the schema. See `app.db.bootstrap`.
+
+    Splitting this into its own function keeps `session.py` free of the alembic
+    import and lets tools/tests call it directly.
+    """
+    from .bootstrap import ensure_schema as _ensure
+
+    return await _ensure(engine)
+
+
 async def dispose_engine() -> None:
     """Close every pooled connection on shutdown (no half-open sockets)."""
     global _engine, _sessionmaker

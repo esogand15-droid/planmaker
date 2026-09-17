@@ -7,6 +7,9 @@
     python -m tools.manage list-users
     python -m tools.manage list-plans [--advisor 1]
     python -m tools.manage audit
+    python -m tools.manage migrate                 # alembic upgrade head
+    python -m tools.manage doctor                  # schema/migration health
+    python -m tools.manage backup [--status]       # one archive, no Telegram
 """
 from __future__ import annotations
 
@@ -34,6 +37,96 @@ async def cmd_init_db() -> None:
     init_engine()
     await create_all()
     print(f"schema ready · {settings.database_url}")
+
+
+async def cmd_migrate() -> None:
+    """`alembic upgrade head` with the same guarantees as the bot's bootstrap."""
+    from app.db.bootstrap import ensure_schema
+
+    init_engine()
+    report = await ensure_schema()
+    print(
+        "migrated={migrated} revision={revision} head={head} created_from_orm={created}".format(
+            migrated=report["migrated"], revision=report["revision"],
+            head=report["head"], created=report["created_from_orm"] or "—",
+        )
+    )
+
+
+async def cmd_doctor() -> None:
+    """Print the schema state — the first thing to check after a failed deploy."""
+    from app.db.bootstrap import current_revision, head_revision, missing_tables
+
+    init_engine()
+    missing = await missing_tables()
+    revision = await current_revision()
+    head = await head_revision()
+    print(f"database     : {settings.database_url.split('@')[-1]}")
+    print(f"revision     : {revision or '<none — never migrated>'}")
+    print(f"expected head: {head}")
+    print(f"missing      : {', '.join(missing) if missing else 'nothing'}")
+    if missing or (revision and head and revision != head):
+        print("\n✖ schema is not up to date — run: python -m tools.manage migrate")
+        raise SystemExit(1)
+    print("\n✔ schema is up to date")
+
+
+async def cmd_backup(out: str | None, keep: int | None, no_pg_dump: bool, show_status: bool) -> None:
+    """Create (or inspect) backups from the shell — no Telegram involved."""
+    from app.db.models import BackupStatus
+    from app.services.backup import (
+        BackupService,
+        create_backup,
+        describe_schedule,
+        human_bytes,
+        prune_backups,
+    )
+
+    init_engine()
+    async with session_scope() as s:
+        service = BackupService(s)
+        if show_status:
+            status = await service.status()
+            row = status["settings"]
+            print(f"auto      : {'on' if row.backup_enabled else 'off'} · "
+                  f"{describe_schedule(row)}")
+            print(f"next run  : {status['next_run']}")
+            print(f"recipients: {status['recipients'] or '—'}")
+            print(f"archives  : {status['archives_on_disk']} "
+                  f"({human_bytes(status['disk_bytes'])}) in {settings.backup_dir}")
+            latest = status["latest"]
+            if latest:
+                print(f"last      : {latest.status.value} {latest.filename} "
+                      f"{human_bytes(latest.size_bytes)} rows={latest.rows}")
+            return
+
+        artifact = await create_backup(
+            root=Path(out) if out else settings.backup_dir,
+            use_pg_dump=not no_pg_dump,
+        )
+        removed = prune_backups(
+            Path(out) if out else settings.backup_dir,
+            keep if keep is not None else (await service.config()).backup_keep,
+        )
+        await service.backups.record(
+            status=BackupStatus.OK,
+            trigger="cli",
+            filename=artifact.filename,
+            path=str(artifact.path),
+            size_bytes=artifact.size_bytes,
+            tables=artifact.tables,
+            rows=artifact.rows,
+            engine=artifact.engine,
+            duration_ms=artifact.duration_ms,
+            sha256=artifact.sha256,
+        )
+        await AuditRepository(s).log(
+            "backup.created", detail=f"cli {artifact.filename} rows={artifact.rows}"
+        )
+    print(f"✔ {artifact.path}  ({human_bytes(artifact.size_bytes)}, "
+          f"{artifact.tables} tables, {artifact.rows} rows, engine={artifact.engine})")
+    if removed:
+        print(f"  retention: removed {len(removed)} older archive(s)")
 
 
 async def cmd_add_user(name: str, role: Role, telegram_id: int | None, advisor: int | None) -> None:
@@ -130,6 +223,16 @@ def main() -> None:
     )
     p.add_argument("--dry-run", action="store_true")
 
+    sub.add_parser("migrate", help="alembic upgrade head (with the boot-time guarantees)")
+    sub.add_parser("doctor", help="report schema/migration state")
+
+    p = sub.add_parser("backup", help="create or inspect a database backup")
+    p.add_argument("--out", default=None, help="directory (default: BACKUP_DIR)")
+    p.add_argument("--keep", type=int, default=None, help="retention count")
+    p.add_argument("--no-pg-dump", action="store_true",
+                   help="force the pure-Python dumper")
+    p.add_argument("--status", action="store_true", help="print settings and history")
+
     sub.add_parser("list-users")
     p = sub.add_parser("list-plans")
     p.add_argument("--advisor", type=int)
@@ -138,6 +241,12 @@ def main() -> None:
     args = parser.parse_args()
     if args.cmd == "init-db":
         asyncio.run(cmd_init_db())
+    elif args.cmd == "migrate":
+        asyncio.run(cmd_migrate())
+    elif args.cmd == "doctor":
+        asyncio.run(cmd_doctor())
+    elif args.cmd == "backup":
+        asyncio.run(cmd_backup(args.out, args.keep, args.no_pg_dump, args.status))
     elif args.cmd == "add-advisor":
         asyncio.run(cmd_add_user(args.name, Role.ADVISOR, args.telegram_id, None))
     elif args.cmd == "add-student":

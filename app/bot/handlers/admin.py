@@ -8,23 +8,32 @@ from __future__ import annotations
 
 import logging
 
+from pathlib import Path
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, FSInputFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aiogram.fsm.state import State, StatesGroup
-
 from ...config import settings
-from ...db.models import Role, User
-from ...domain.persian import jalali_short, to_en_digits, to_fa_digits, week_label
+from ...db.models import BackupSchedule, BackupStatus, BotSettings, Role, User
+from ...domain.persian import (
+    jalali_datetime,
+    jalali_short,
+    to_en_digits,
+    to_fa_digits,
+    week_label,
+)
 from ...security import is_admin
 from ...services.admin_service import AdminService, uptime
+from ...services.backup import BackupService, human_bytes, next_run
 from ...services.deletion import DeletionService
 from ...services.plan_manager import PlanManager, StudentError
 from ...services.render_queue import RenderQueue
 from .. import keyboards as kb
 from .. import texts as T
+from .. import ui
 from ..texts import AdminCB
 
 log = logging.getLogger(__name__)
@@ -61,10 +70,18 @@ def fa(value) -> str:
 
 
 async def _edit(cq: CallbackQuery, text: str, markup) -> None:
-    try:
-        await cq.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
-    except Exception:
-        await cq.message.answer(text, reply_markup=markup, parse_mode="HTML")
+    """Edit the panel message, or send a fresh one when editing is impossible.
+
+    Buttons older than 48 hours arrive with an `InaccessibleMessage`, and
+    `edit_text` also fails on unchanged content — both used to bubble up as
+    «❌ انجام این کار با مشکل مواجه شد» even though the action had succeeded.
+    """
+    await ui.edit_or_send(cq, text, markup)
+
+
+#: a callback query may only be answered once; panel screens are re-rendered by
+#: calling each other, so every answer goes through the idempotent helper.
+_answer = ui.answer
 
 
 @router.callback_query(AdminCB.filter(F.action == "home"))
@@ -90,7 +107,7 @@ async def admin_home(
         ),
         kb.admin_menu(),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 # ────────────────────────────── access requests ─────────────────────────────
@@ -106,7 +123,7 @@ async def admin_requests(
     rows = await manager.requests.pending(PAGE, callback_data.page * PAGE)
     if not rows:
         await _edit(cq, T.ADMIN_NO_REQUESTS, kb.admin_back())
-        await cq.answer()
+        await _answer(cq)
         return
     body = [T.ADMIN_REQUESTS.format(count=fa(total)), ""]
     for request in rows:
@@ -118,7 +135,7 @@ async def admin_requests(
         )
     await _edit(cq, "\n".join(body),
                 kb.admin_requests(rows, callback_data.page, total, PAGE))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "request"))
@@ -129,7 +146,7 @@ async def admin_request_card(
     _guard(cq, user)
     request = await PlanManager(session).requests.by_id(callback_data.ref)
     if request is None:
-        await cq.answer("درخواست پیدا نشد.", show_alert=True)
+        await _answer(cq, "درخواست پیدا نشد.", show_alert=True)
         return
     await _edit(
         cq,
@@ -143,7 +160,7 @@ async def admin_request_card(
         ),
         kb.admin_request_card(request.id),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "grant_student"))
@@ -154,11 +171,11 @@ async def admin_pick_advisor_for_request(
     _guard(cq, user)
     candidates = await AdminService(session).advisor_candidates()
     if not candidates:
-        await cq.answer("مشاوری برای تخصیص وجود ندارد.", show_alert=True)
+        await _answer(cq, "مشاوری برای تخصیص وجود ندارد.", show_alert=True)
         return
     await _edit(cq, T.ADMIN_PICK_TARGET_ADVISOR,
                 kb.admin_pick_advisor_for_request(candidates, callback_data.ref))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "grant"))
@@ -183,11 +200,11 @@ async def admin_grant_role(
         )
         await session.commit()
     except StudentError as exc:
-        await cq.answer(str(exc), show_alert=True)
+        await _answer(cq, str(exc), show_alert=True)
         return
 
     role_fa = T.ROLE_FA[role.value]
-    await cq.answer(
+    await _answer(cq, 
         T.ADMIN_REQUEST_APPROVED.format(name=created.full_name, role=role_fa),
         show_alert=True,
     )
@@ -214,9 +231,9 @@ async def admin_reject_request(
         request = await manager.reject_request(user, callback_data.ref)
         await session.commit()
     except StudentError as exc:
-        await cq.answer(str(exc), show_alert=True)
+        await _answer(cq, str(exc), show_alert=True)
         return
-    await cq.answer(T.ADMIN_REQUEST_REJECTED.format(name=request.full_name),
+    await _answer(cq, T.ADMIN_REQUEST_REJECTED.format(name=request.full_name),
                     show_alert=True)
     await admin_requests(cq, AdminCB(action="requests"), session, user)
 
@@ -229,7 +246,7 @@ async def admin_add_advisor_prompt(
     _guard(cq, user)
     await state.set_state(AdminFlow.add_advisor)
     await _edit(cq, T.ADMIN_ADD_ADVISOR_PROMPT, kb.admin_back("advisors"))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.message(AdminFlow.add_advisor, F.text)
@@ -278,7 +295,7 @@ async def admin_advisors(
     rows = await service.advisors(PAGE, callback_data.page * PAGE)
     if not rows:
         await _edit(cq, T.ADMIN_NO_ADVISORS, kb.admin_no_advisors())
-        await cq.answer()
+        await _answer(cq)
         return
     body = [T.ADMIN_ADVISORS.format(count=fa(total)), ""]
     for advisor, students, plans in rows:
@@ -289,7 +306,7 @@ async def admin_advisors(
         )
     await _edit(cq, "\n".join(body),
                 kb.admin_advisors(rows, callback_data.page, total, PAGE))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "advisor"))
@@ -300,7 +317,7 @@ async def admin_advisor_card(
     _guard(cq, user)
     data = await AdminService(session).advisor_detail(callback_data.ref)
     if not data:
-        await cq.answer("مشاور پیدا نشد.", show_alert=True)
+        await _answer(cq, "مشاور پیدا نشد.", show_alert=True)
         return
     advisor = data["advisor"]
     last = data["last_seen"]
@@ -319,7 +336,7 @@ async def admin_advisor_card(
         ),
         kb.admin_advisor_card(advisor),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "advisor_students"))
@@ -332,13 +349,13 @@ async def admin_advisor_students(
         callback_data.ref, PAGE, callback_data.page * PAGE
     )
     if not students:
-        await cq.answer("این مشاور دانش‌آموزی ندارد.", show_alert=True)
+        await _answer(cq, "این مشاور دانش‌آموزی ندارد.", show_alert=True)
         return
     await _edit(
         cq, T.ADMIN_STUDENTS.format(count=fa(total)),
         kb.admin_students(students, callback_data.page, total, PAGE, ref=callback_data.ref),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "advisor_plans"))
@@ -353,14 +370,14 @@ async def admin_advisor_plans(
     )
     total = await manager.plans.count_history(advisor_id=callback_data.ref)
     if not plans:
-        await cq.answer("برنامه‌ای ثبت نشده است.", show_alert=True)
+        await _answer(cq, "برنامه‌ای ثبت نشده است.", show_alert=True)
         return
     await _edit(
         cq, T.ADMIN_PLANS.format(count=fa(total)),
         kb.admin_plans(plans, callback_data.page, total, PAGE,
                        ref=callback_data.ref, action="advisor_plans"),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "edit_advisor"))
@@ -371,14 +388,14 @@ async def admin_edit_advisor_prompt(
     _guard(cq, user)
     advisor = await PlanManager(session).users.by_id(callback_data.ref)
     if advisor is None:
-        await cq.answer("مشاور پیدا نشد.", show_alert=True)
+        await _answer(cq, "مشاور پیدا نشد.", show_alert=True)
         return
     await state.set_state(AdminFlow.edit_advisor)
     await state.update_data(target=advisor.id)
     current = advisor.full_name + (f" | {advisor.telegram_id}" if advisor.telegram_id else "")
     await _edit(cq, T.ADMIN_EDIT_ADVISOR_PROMPT.format(current=current),
                 kb.admin_back("advisor", advisor.id))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.message(AdminFlow.edit_advisor, F.text)
@@ -431,7 +448,7 @@ async def admin_search_advisor(
     _guard(cq, user)
     await state.set_state(AdminFlow.search_advisor)
     await _edit(cq, T.ADMIN_SEARCH_PROMPT, kb.admin_back("advisors"))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.message(AdminFlow.search_advisor, F.text)
@@ -462,10 +479,10 @@ async def admin_ask_suspend(
     _guard(cq, user)
     advisor = await PlanManager(session).users.by_id(callback_data.ref)
     if advisor is None:
-        await cq.answer("پیدا نشد.", show_alert=True)
+        await _answer(cq, "پیدا نشد.", show_alert=True)
         return
     if is_admin(advisor, advisor.telegram_id):
-        await cq.answer(T.ADMIN_SELF_ACTION, show_alert=True)
+        await _answer(cq, T.ADMIN_SELF_ACTION, show_alert=True)
         return
     what = (
         f"فعال‌سازی حساب «{advisor.full_name}»"
@@ -475,7 +492,7 @@ async def admin_ask_suspend(
     )
     await _edit(cq, T.ADMIN_CONFIRM.format(what=what),
                 kb.admin_confirm("do_suspend", advisor.id))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "do_suspend"))
@@ -487,17 +504,17 @@ async def admin_do_suspend(
     manager = PlanManager(session)
     target = await manager.users.by_id(callback_data.ref)
     if target is None:
-        await cq.answer("پیدا نشد.", show_alert=True)
+        await _answer(cq, "پیدا نشد.", show_alert=True)
         return
     if is_admin(target, target.telegram_id):
-        await cq.answer(T.ADMIN_SELF_ACTION, show_alert=True)
+        await _answer(cq, T.ADMIN_SELF_ACTION, show_alert=True)
         return
     target.is_active = not target.is_active
     await manager.audit.log(
         "advisor.activated" if target.is_active else "advisor.suspended",
         actor_id=user.id if user else None, detail=target.full_name,
     )
-    await cq.answer(
+    await _answer(cq, 
         (T.ADMIN_ACTIVATED if target.is_active else T.ADMIN_SUSPENDED).format(
             name=target.full_name
         ),
@@ -517,7 +534,7 @@ async def admin_ask_delete_advisor(
     try:
         report = await service.preview_advisor(user, callback_data.ref)
     except StudentError as exc:
-        await cq.answer(str(exc), show_alert=True)
+        await _answer(cq, str(exc), show_alert=True)
         return
     note = (
         T.ADMIN_ADVISOR_HAS_STUDENTS if report.students else T.ADMIN_ADVISOR_NO_STUDENTS
@@ -530,7 +547,7 @@ async def admin_ask_delete_advisor(
         ),
         kb.admin_delete_advisor(callback_data.ref, bool(report.students)),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "del_advisor_pick"))
@@ -541,11 +558,11 @@ async def admin_pick_transfer_target(
     _guard(cq, user)
     candidates = await AdminService(session).advisor_candidates(exclude=callback_data.ref)
     if not candidates:
-        await cq.answer("مشاور دیگری برای انتقال وجود ندارد.", show_alert=True)
+        await _answer(cq, "مشاور دیگری برای انتقال وجود ندارد.", show_alert=True)
         return
     await _edit(cq, T.ADMIN_PICK_TARGET_ADVISOR,
                 kb.admin_pick_advisor(candidates, callback_data.ref, "del_advisor_to"))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action.in_({"del_advisor", "del_advisor_to"})))
@@ -564,11 +581,11 @@ async def admin_delete_advisor(
         )
         await session.commit()
     except StudentError as exc:
-        await cq.answer(str(exc), show_alert=True)
+        await _answer(cq, str(exc), show_alert=True)
         return
     except Exception:
         log.exception("advisor deletion failed (id=%s)", callback_data.ref)
-        await cq.answer(T.ADMIN_DELETE_FAILED, show_alert=True)
+        await _answer(cq, T.ADMIN_DELETE_FAILED, show_alert=True)
         return
 
     detail = (
@@ -576,7 +593,7 @@ async def admin_delete_advisor(
         if transfer else
         f"{fa(report.detached)} دانش‌آموز بدون مشاور شد · {fa(report.files)} فایل پاک شد"
     )
-    await cq.answer(T.ADMIN_ADVISOR_DELETED.format(name=report.name, detail=detail),
+    await _answer(cq, T.ADMIN_ADVISOR_DELETED.format(name=report.name, detail=detail),
                     show_alert=True)
     await admin_advisors(cq, AdminCB(action="advisors"), session, user)
 
@@ -593,11 +610,11 @@ async def admin_students(
     students = await service.students(PAGE, callback_data.page * PAGE)
     if not students:
         await _edit(cq, T.ADMIN_NO_STUDENTS, kb.admin_back())
-        await cq.answer()
+        await _answer(cq)
         return
     await _edit(cq, T.ADMIN_STUDENTS.format(count=fa(total)),
                 kb.admin_students(students, callback_data.page, total, PAGE))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "student"))
@@ -608,7 +625,7 @@ async def admin_student_card(
     _guard(cq, user)
     data = await AdminService(session).student_detail(callback_data.ref)
     if not data:
-        await cq.answer("دانش‌آموز پیدا نشد.", show_alert=True)
+        await _answer(cq, "دانش‌آموز پیدا نشد.", show_alert=True)
         return
     student = data["student"]
     last = data.get("last_seen")
@@ -630,7 +647,7 @@ async def admin_student_card(
         ),
         kb.admin_student_card(student),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "student_plans"))
@@ -645,12 +662,12 @@ async def admin_student_plans(
     )
     total = await manager.plans.count_history(student_id=callback_data.ref)
     if not plans:
-        await cq.answer("برنامه‌ای ثبت نشده است.", show_alert=True)
+        await _answer(cq, "برنامه‌ای ثبت نشده است.", show_alert=True)
         return
     await _edit(cq, T.ADMIN_PLANS.format(count=fa(total)),
                 kb.admin_plans(plans, callback_data.page, total, PAGE,
                                ref=callback_data.ref, action="student_plans"))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "edit_student"))
@@ -661,14 +678,14 @@ async def admin_edit_student_prompt(
     _guard(cq, user)
     student = await PlanManager(session).users.by_id(callback_data.ref)
     if student is None:
-        await cq.answer("دانش‌آموز پیدا نشد.", show_alert=True)
+        await _answer(cq, "دانش‌آموز پیدا نشد.", show_alert=True)
         return
     await state.set_state(AdminFlow.edit_student)
     await state.update_data(target=student.id)
     current = student.full_name + (f" | {student.grade}" if student.grade else "")
     await _edit(cq, T.ADMIN_EDIT_STUDENT_PROMPT.format(current=current),
                 kb.admin_back("student", student.id))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.message(AdminFlow.edit_student, F.text)
@@ -711,7 +728,7 @@ async def admin_search_student(
     _guard(cq, user)
     await state.set_state(AdminFlow.search_student)
     await _edit(cq, T.ADMIN_SEARCH_PROMPT, kb.admin_back("students"))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.message(AdminFlow.search_student, F.text)
@@ -742,13 +759,13 @@ async def admin_ask_suspend_student(
     _guard(cq, user)
     student = await PlanManager(session).users.by_id(callback_data.ref)
     if student is None:
-        await cq.answer("پیدا نشد.", show_alert=True)
+        await _answer(cq, "پیدا نشد.", show_alert=True)
         return
     what = ("فعال‌سازی" if not student.is_active else "غیرفعال‌سازی") + \
         f" حساب «{student.full_name}»"
     await _edit(cq, T.ADMIN_CONFIRM.format(what=what),
                 kb.admin_confirm("do_suspend_student", student.id))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "do_suspend_student"))
@@ -760,14 +777,14 @@ async def admin_do_suspend_student(
     manager = PlanManager(session)
     student = await manager.users.by_id(callback_data.ref)
     if student is None or student.role is not Role.STUDENT:
-        await cq.answer("پیدا نشد.", show_alert=True)
+        await _answer(cq, "پیدا نشد.", show_alert=True)
         return
     student.is_active = not student.is_active
     await manager.audit.log(
         "student.activated" if student.is_active else "student.suspended",
         actor_id=user.id if user else None, student_id=student.id,
     )
-    await cq.answer(
+    await _answer(cq, 
         (T.ADMIN_ACTIVATED if student.is_active else T.ADMIN_SUSPENDED).format(
             name=student.full_name
         ),
@@ -787,7 +804,7 @@ async def admin_ask_delete_student(
     try:
         report = await service.preview_student(user, callback_data.ref)
     except StudentError as exc:
-        await cq.answer(str(exc), show_alert=True)
+        await _answer(cq, str(exc), show_alert=True)
         return
     impact = "\n".join(
         line for line in [
@@ -803,7 +820,7 @@ async def admin_ask_delete_student(
         T.CONFIRM_REMOVE_STUDENT.format(name=report.name, impact=impact),
         kb.admin_confirm("del_student", callback_data.ref, label="➡️ ادامه"),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "del_student"))
@@ -818,7 +835,7 @@ async def admin_confirm_delete_student(
         cq, T.CONFIRM_REMOVE_STUDENT_FINAL.format(name=report.name),
         kb.admin_confirm("del_student_final", callback_data.ref, label="🗑 حذف قطعی"),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "del_student_final"))
@@ -832,13 +849,13 @@ async def admin_delete_student(
         report = await service.delete_student(user, callback_data.ref)
         await session.commit()
     except StudentError as exc:
-        await cq.answer(str(exc), show_alert=True)
+        await _answer(cq, str(exc), show_alert=True)
         return
     except Exception:
         log.exception("admin student deletion failed (id=%s)", callback_data.ref)
-        await cq.answer(T.ADMIN_DELETE_FAILED, show_alert=True)
+        await _answer(cq, T.ADMIN_DELETE_FAILED, show_alert=True)
         return
-    await cq.answer(T.ADMIN_STUDENT_DELETED.format(name=report.name), show_alert=True)
+    await _answer(cq, T.ADMIN_STUDENT_DELETED.format(name=report.name), show_alert=True)
     await admin_students(cq, AdminCB(action="students"), session, user)
 
 
@@ -852,14 +869,14 @@ async def admin_transfer_pick(
     service = AdminService(session)
     data = await service.student_detail(callback_data.ref)
     if not data:
-        await cq.answer("دانش‌آموز پیدا نشد.", show_alert=True)
+        await _answer(cq, "دانش‌آموز پیدا نشد.", show_alert=True)
         return
     current_ids = [a.id for a in data["advisors"]]
     candidates = await service.advisor_candidates(
         exclude=current_ids[0] if current_ids else 0
     )
     if not candidates:
-        await cq.answer("مشاور دیگری وجود ندارد.", show_alert=True)
+        await _answer(cq, "مشاور دیگری وجود ندارد.", show_alert=True)
         return
     await _edit(
         cq,
@@ -869,7 +886,7 @@ async def admin_transfer_pick(
         ),
         kb.admin_pick_advisor(candidates, callback_data.ref, "transfer_to"),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "transfer_to"))
@@ -882,7 +899,7 @@ async def admin_transfer_confirm(
     data = await service.student_detail(callback_data.ref)
     target = await PlanManager(session).users.by_id(int(callback_data.arg))
     if not data or target is None:
-        await cq.answer("اطلاعات نامعتبر است.", show_alert=True)
+        await _answer(cq, "اطلاعات نامعتبر است.", show_alert=True)
         return
     await _edit(
         cq,
@@ -893,7 +910,7 @@ async def admin_transfer_confirm(
         ),
         kb.admin_confirm("do_transfer", callback_data.ref, callback_data.arg),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "do_transfer"))
@@ -908,9 +925,9 @@ async def admin_do_transfer(
             user, callback_data.ref, int(callback_data.arg)
         )
     except StudentError as exc:
-        await cq.answer(str(exc), show_alert=True)
+        await _answer(cq, str(exc), show_alert=True)
         return
-    await cq.answer(
+    await _answer(cq, 
         T.ADMIN_TRANSFER_DONE.format(name=student.full_name, new=target.full_name),
         show_alert=True,
     )
@@ -926,7 +943,7 @@ async def admin_connection(
     _guard(cq, user)
     student = await PlanManager(session).users.by_id(callback_data.ref)
     if student is None:
-        await cq.answer("دانش‌آموز پیدا نشد.", show_alert=True)
+        await _answer(cq, "دانش‌آموز پیدا نشد.", show_alert=True)
         return
     await _edit(
         cq,
@@ -938,7 +955,7 @@ async def admin_connection(
         ),
         kb.admin_connection(student),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "reissue"))
@@ -950,7 +967,7 @@ async def admin_reissue_invite(
     manager = PlanManager(session)
     student = await manager.users.by_id(callback_data.ref)
     if student is None or student.telegram_id:
-        await cq.answer("این دانش‌آموز از قبل متصل است.", show_alert=True)
+        await _answer(cq, "این دانش‌آموز از قبل متصل است.", show_alert=True)
         return
     token = await manager.users.rotate_invite_token(student)
     await manager.audit.log(
@@ -958,16 +975,16 @@ async def admin_reissue_invite(
     )
     me = await cq.bot.me()
     link = f"https://t.me/{me.username}?start=inv_{token}"
-    await cq.message.answer(
+    await ui.send_text_safe(
+        cq,
         T.INVITE_READY.format(
             name=student.full_name, link=link,
             expires=jalali_short(student.invite_expires_at.date()),
         ),
         reply_markup=kb.admin_connection(student),
-        parse_mode="HTML",
         disable_web_page_preview=True,
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "revoke_invite"))
@@ -979,13 +996,13 @@ async def admin_revoke_invite(
     manager = PlanManager(session)
     student = await manager.users.by_id(callback_data.ref)
     if student is None:
-        await cq.answer("پیدا نشد.", show_alert=True)
+        await _answer(cq, "پیدا نشد.", show_alert=True)
         return
     await manager.users.revoke_invite(student)
     await manager.audit.log(
         "student.invite_revoked", actor_id=user.id if user else None, student_id=student.id
     )
-    await cq.answer(T.INVITE_REVOKED, show_alert=True)
+    await _answer(cq, T.INVITE_REVOKED, show_alert=True)
     await admin_connection(cq, AdminCB(action="connection", ref=student.id), session, user)
 
 
@@ -997,7 +1014,7 @@ async def admin_ask_unlink(
     _guard(cq, user)
     student = await PlanManager(session).users.by_id(callback_data.ref)
     if student is None:
-        await cq.answer("پیدا نشد.", show_alert=True)
+        await _answer(cq, "پیدا نشد.", show_alert=True)
         return
     await _edit(
         cq,
@@ -1007,7 +1024,7 @@ async def admin_ask_unlink(
         ),
         kb.admin_confirm("do_unlink", student.id),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "do_unlink"))
@@ -1020,9 +1037,9 @@ async def admin_do_unlink(
     try:
         student = await service.unlink_telegram(user, callback_data.ref)
     except StudentError as exc:
-        await cq.answer(str(exc), show_alert=True)
+        await _answer(cq, str(exc), show_alert=True)
         return
-    await cq.answer(T.ADMIN_UNLINKED.format(name=student.full_name), show_alert=True)
+    await _answer(cq, T.ADMIN_UNLINKED.format(name=student.full_name), show_alert=True)
     await admin_connection(cq, AdminCB(action="connection", ref=student.id), session, user)
 
 
@@ -1039,11 +1056,11 @@ async def admin_plans(
     if not plans:
         await _edit(cq, "📋 <b>مدیریت برنامه‌ها</b>\n\nهنوز برنامه‌ای ساخته نشده است.",
                     kb.admin_back())
-        await cq.answer()
+        await _answer(cq)
         return
     await _edit(cq, T.ADMIN_PLANS.format(count=fa(total)),
                 kb.admin_plans(plans, callback_data.page, total, PAGE))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "plan"))
@@ -1055,7 +1072,7 @@ async def admin_plan_card(
     manager = PlanManager(session)
     plan = await manager.plans.get(callback_data.ref)
     if plan is None:
-        await cq.answer("برنامه پیدا نشد.", show_alert=True)
+        await _answer(cq, "برنامه پیدا نشد.", show_alert=True)
         return
     domain = PlanManager.to_domain(plan)
     await _edit(
@@ -1071,7 +1088,7 @@ async def admin_plan_card(
         ),
         kb.admin_plan_card(plan),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "ask_del_plan"))
@@ -1082,7 +1099,7 @@ async def admin_ask_delete_plan(
     _guard(cq, user)
     plan = await PlanManager(session).plans.get(callback_data.ref)
     if plan is None:
-        await cq.answer("برنامه پیدا نشد.", show_alert=True)
+        await _answer(cq, "برنامه پیدا نشد.", show_alert=True)
         return
     await _edit(
         cq,
@@ -1093,7 +1110,7 @@ async def admin_ask_delete_plan(
         ),
         kb.admin_confirm("del_plan", plan.id, label="🗑 حذف قطعی"),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "del_plan"))
@@ -1107,13 +1124,13 @@ async def admin_delete_plan(
         report = await service.delete_plan(user, callback_data.ref)
         await session.commit()
     except StudentError as exc:
-        await cq.answer(str(exc), show_alert=True)
+        await _answer(cq, str(exc), show_alert=True)
         return
     except Exception:
         log.exception("admin plan deletion failed (id=%s)", callback_data.ref)
-        await cq.answer(T.ADMIN_DELETE_FAILED, show_alert=True)
+        await _answer(cq, T.ADMIN_DELETE_FAILED, show_alert=True)
         return
-    await cq.answer(T.ADMIN_PLAN_DELETED.format(files=fa(report.files)), show_alert=True)
+    await _answer(cq, T.ADMIN_PLAN_DELETED.format(files=fa(report.files)), show_alert=True)
     await admin_plans(cq, AdminCB(action="plans"), session, user)
 
 
@@ -1141,7 +1158,7 @@ async def admin_system(
         ),
         kb.admin_system(),
     )
-    await cq.answer(T.ADMIN_HEALTH_OK if callback_data.action == "health" else None)
+    await _answer(cq, T.ADMIN_HEALTH_OK if callback_data.action == "health" else None)
 
 
 @router.callback_query(AdminCB.filter(F.action == "bot"))
@@ -1166,7 +1183,7 @@ async def admin_bot(
         ),
         kb.admin_back("bot"),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "db"))
@@ -1190,14 +1207,14 @@ async def admin_db(
         ),
         kb.admin_back("db"),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 # ─────────────────────────────── storage ────────────────────────────────────
 @router.callback_query(AdminCB.filter(F.action == "storage"))
 async def admin_storage(
-    cq: CallbackQuery, session: AsyncSession, queue: RenderQueue,
-    user: User | None = None,
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    queue: RenderQueue, user: User | None = None,
 ) -> None:
     _guard(cq, user)
     report = await AdminService(session).storage_report(queue.service.storage_root)
@@ -1214,7 +1231,7 @@ async def admin_storage(
         ),
         kb.admin_storage(len(report.orphans)),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "ask_cleanup"))
@@ -1231,7 +1248,7 @@ async def admin_ask_cleanup(
         ),
         kb.admin_confirm("do_cleanup", 0, label="🧹 پاک‌سازی"),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "do_cleanup"))
@@ -1245,8 +1262,8 @@ async def admin_do_cleanup(
     await PlanManager(session).audit.log(
         "storage.cleanup", actor_id=user.id if user else None, detail=f"files={removed}"
     )
-    await cq.answer(T.ADMIN_CLEANUP_DONE.format(files=fa(removed)), show_alert=True)
-    await admin_storage(cq, session, queue, user)
+    await _answer(cq, T.ADMIN_CLEANUP_DONE.format(files=fa(removed)), show_alert=True)
+    await admin_storage(cq, AdminCB(action="storage"), session, queue, user)
 
 
 # ──────────────────────────── stats / audit ─────────────────────────────────
@@ -1274,7 +1291,7 @@ async def admin_stats(
         ),
         kb.admin_back("stats"),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "audit"))
@@ -1287,7 +1304,7 @@ async def admin_audit(
     if not rows:
         await _edit(cq, "🧾 <b>گزارش فعالیت‌ها</b>\n\nرویدادی ثبت نشده است.",
                     kb.admin_back())
-        await cq.answer()
+        await _answer(cq)
         return
     pages = max(1, -(-total // PAGE))
     lines = [T.ADMIN_AUDIT.format(page=fa(callback_data.page + 1), pages=fa(pages)), ""]
@@ -1299,7 +1316,7 @@ async def admin_audit(
             + (f"\n   {entry.detail}" if entry.detail else "")
         )
     await _edit(cq, "\n".join(lines), kb.admin_audit(callback_data.page, total, PAGE))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AdminCB.filter(F.action == "settings"))
@@ -1321,4 +1338,405 @@ async def admin_settings(cq: CallbackQuery, user: User | None = None) -> None:
         ),
         kb.admin_back("settings"),
     )
-    await cq.answer()
+    await _answer(cq)
+
+
+# ═════════════════════════════════ backups ══════════════════════════════════
+def _schedule_label(row: BotSettings) -> str:
+    """Persian description of the current schedule (panel + confirmations)."""
+    from ...domain.models import WEEKDAY_FA, WEEKDAY_KEYS
+
+    key = row.backup_schedule.value if isinstance(row.backup_schedule, BackupSchedule) \
+        else str(row.backup_schedule)
+    template = T.BACKUP_SCHEDULE_FA.get(key, T.BACKUP_SCHEDULE_FA["daily"])
+    return template.format(
+        n=fa(row.backup_every_hours),
+        hour=fa(f"{row.backup_hour:02d}:00"),
+        day=WEEKDAY_FA[WEEKDAY_KEYS[min(6, max(0, row.backup_weekday))]],
+    )
+
+
+def _backup_when(moment) -> str:
+    return jalali_datetime(moment) if moment else "—"
+
+
+def _last_backup_block(entry) -> str:
+    if entry is None:
+        return T.ADMIN_BACKUP_LAST_NONE
+    if entry.status is not BackupStatus.OK:
+        return T.ADMIN_BACKUP_LAST_FAILED.format(
+            when=_backup_when(entry.at), error=(entry.error or "—")[:200]
+        )
+    return T.ADMIN_BACKUP_LAST_ROW.format(
+        icon="✅",
+        when=_backup_when(entry.at),
+        filename=entry.filename or "—",
+        size=human_bytes(entry.size_bytes),
+        rows=fa(entry.rows),
+        tables=fa(entry.tables),
+        engine=entry.engine or "—",
+        delivered=fa(entry.delivered),
+    )
+
+
+async def _render_backup_panel(
+    cq: CallbackQuery, session: AsyncSession, user: User | None
+) -> None:
+    """One place builds the 🧰 بکاپ‌گیری screen: status + history + controls."""
+    service = BackupService(session)
+    status = await service.status()
+    row: BotSettings = status["settings"]
+    latest = status["latest"]
+    on_disk = Path(latest.path) if latest and latest.path else None
+    has_file = bool(on_disk and on_disk.exists())
+    recipients = status["recipients"]
+    shown = recipients[:4]
+    recipient_text = "، ".join(f"<code>{c}</code>" for c in shown)
+    if len(recipients) > len(shown):
+        recipient_text += f" و {fa(len(recipients) - len(shown))} گیرنده دیگر"
+    if not recipient_text:
+        recipient_text = "⚠️ گیرنده‌ای تنظیم نشده (ADMIN_IDS خالی است)"
+
+    await _edit(
+        cq,
+        T.ADMIN_BACKUP.format(
+            status=T.BACKUP_STATUS_ON if row.backup_enabled else T.BACKUP_STATUS_OFF,
+            schedule=_schedule_label(row),
+            recipients=recipient_text,
+            last=_last_backup_block(latest),
+            archives=fa(status["archives_on_disk"]),
+            size=human_bytes(status["disk_bytes"]),
+            ok=fa(status["stats"]["ok"]),
+            failed=fa(status["stats"]["failed"]),
+            keep=fa(row.backup_keep),
+            next=(
+                _backup_when(status["next_run"])
+                if status["next_run"]
+                else "— (بکاپ خودکار خاموش است)"
+            ),
+            directory=settings.backup_dir,
+        ),
+        kb.admin_backup(row, last_ok=latest is not None
+                        and latest.status is BackupStatus.OK, has_file=has_file),
+    )
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup"))
+async def admin_backup_panel(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    await _render_backup_panel(cq, session, user)
+    await _answer(cq)
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_now"))
+async def admin_backup_now(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    """Take a backup right now and send the archive to the admin chats."""
+    _guard(cq, user)
+    await _answer(cq, "⏳ در حال تهیه بکاپ…")
+    await _edit(cq, T.ADMIN_BACKUP_RUNNING, kb.admin_back("backup"))
+
+    service = BackupService(session, cq.bot)
+    try:
+        artifact, entry = await service.run(
+            trigger="manual", actor_id=user.id if user else None, send=True
+        )
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        log.exception("manual backup failed")
+        await _answer(cq, T.ADMIN_BACKUP_FAILED.format(error="خطای داخلی — لاگ‌ها را ببینید"),
+                      show_alert=True)
+        await _render_backup_panel(cq, session, user)
+        return
+
+    if artifact is None:
+        await _answer(
+            cq, T.ADMIN_BACKUP_FAILED.format(error=(entry.error or "نامشخص")[:300]),
+            show_alert=True,
+        )
+        await _render_backup_panel(cq, session, user)
+        return
+
+    await _edit(
+        cq,
+        T.ADMIN_BACKUP_SENT.format(
+            filename=artifact.filename,
+            size=human_bytes(artifact.size_bytes),
+            rows=fa(artifact.rows),
+            tables=fa(artifact.tables),
+            engine=artifact.engine,
+            seconds=fa(round(artifact.duration_ms / 1000, 1)),
+            delivered=fa(entry.delivered),
+        ),
+        kb.admin_backup(await service.config(), last_ok=True,
+                        has_file=artifact.path.exists()),
+    )
+    if entry.delivered == 0:
+        await cq.bot.send_message(
+            cq.from_user.id, T.ADMIN_BACKUP_NO_RECIPIENT, parse_mode="HTML"
+        )
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_send_last"))
+async def admin_backup_send_last(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    """Re-send the newest archive without taking a new backup."""
+    _guard(cq, user)
+    service = BackupService(session)
+    entry = await service.backups.latest_ok()
+    if entry is None or not entry.path:
+        await _answer(cq, T.ADMIN_BACKUP_FILE_MISSING, show_alert=True)
+        return
+    path = Path(entry.path)
+    if not path.exists():
+        await _answer(cq, T.ADMIN_BACKUP_FILE_MISSING, show_alert=True)
+        return
+    await _answer(cq, "⏳ در حال ارسال…")
+    try:
+        await cq.bot.send_document(
+            cq.from_user.id,
+            FSInputFile(path),
+            caption=T.BACKUP_CAPTION_MANUAL.format(when=_backup_when(entry.at)),
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        log.warning("could not re-send the last backup: %s", exc)
+        await _answer(cq, T.ADMIN_BACKUP_FILE_MISSING, show_alert=True)
+        return
+    await service.audit.log(
+        "backup.sent", actor_id=user.id if user else None, detail=entry.filename
+    )
+    await cq.bot.send_message(cq.from_user.id, T.ADMIN_BACKUP_SENT_AGAIN)
+    await _render_backup_panel(cq, session, user)
+
+
+@router.callback_query(AdminCB.filter(F.action.in_({"backup_auto_on", "backup_auto_off"})))
+async def admin_backup_toggle(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    service = BackupService(session)
+    enabled = callback_data.action == "backup_auto_on"
+    row = await service.set_enabled(enabled, actor_id=user.id if user else None)
+    await session.commit()
+    recipients = row.recipient_list()
+    text = (
+        T.ADMIN_BACKUP_AUTO_ON.format(
+            schedule=_schedule_label(row),
+            next=_backup_when(next_run(row)),
+            recipients=(
+                "، ".join(f"<code>{c}</code>" for c in recipients[:4])
+                or "⚠️ گیرنده‌ای تنظیم نشده"
+            ),
+        )
+        if enabled
+        else T.ADMIN_BACKUP_AUTO_OFF
+    )
+    await _answer(cq, text, show_alert=True)
+    await _render_backup_panel(cq, session, user)
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_sched"))
+async def admin_backup_schedule(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    from ...domain.models import WEEKDAY_FA, WEEKDAY_KEYS
+
+    row = await BackupService(session).config()
+    await _edit(
+        cq,
+        T.ADMIN_BACKUP_SCHED.format(
+            current=_schedule_label(row),
+            hour=fa(f"{row.backup_hour:02d}:00"),
+            day=WEEKDAY_FA[WEEKDAY_KEYS[min(6, max(0, row.backup_weekday))]],
+            interval=f"{fa(row.backup_every_hours)} ساعت",
+        ),
+        kb.admin_backup_schedules(
+            row.backup_schedule.value if isinstance(row.backup_schedule, BackupSchedule)
+            else str(row.backup_schedule)
+        ),
+    )
+    await _answer(cq)
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_set_sched"))
+async def admin_backup_set_schedule(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    try:
+        schedule = BackupSchedule(callback_data.arg)
+    except ValueError:
+        await _answer(cq, "مقدار نامعتبر است.", show_alert=True)
+        return
+    service = BackupService(session)
+    row = await service.set_schedule(schedule, actor_id=user.id if user else None)
+    await session.commit()
+    await _answer(cq, f"✅ زمان‌بندی تغییر کرد: {_schedule_label(row)}", show_alert=True)
+    await admin_backup_schedule(cq, AdminCB(action="backup_sched"), session, user)
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_hour"))
+async def admin_backup_hour(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    row = await BackupService(session).config()
+    await _edit(
+        cq, T.ADMIN_BACKUP_HOUR.format(hour=fa(f"{row.backup_hour:02d}:00")),
+        kb.admin_backup_hours(row.backup_hour),
+    )
+    await _answer(cq)
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_set_hour"))
+async def admin_backup_set_hour(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    service = BackupService(session)
+    row = await service.set_hour(callback_data.ref, actor_id=user.id if user else None)
+    await session.commit()
+    await _answer(cq, f"✅ ساعت بکاپ: {fa(f'{row.backup_hour:02d}:00')}", show_alert=True)
+    await _render_backup_panel(cq, session, user)
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_day"))
+async def admin_backup_day(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    from ...domain.models import WEEKDAY_FA, WEEKDAY_KEYS
+
+    row = await BackupService(session).config()
+    await _edit(
+        cq,
+        T.ADMIN_BACKUP_DAY.format(
+            day=WEEKDAY_FA[WEEKDAY_KEYS[min(6, max(0, row.backup_weekday))]]
+        ),
+        kb.admin_backup_days(row.backup_weekday),
+    )
+    await _answer(cq)
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_set_day"))
+async def admin_backup_set_day(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    from ...domain.models import WEEKDAY_FA, WEEKDAY_KEYS
+
+    service = BackupService(session)
+    row = await service.set_weekday(callback_data.ref, actor_id=user.id if user else None)
+    await session.commit()
+    day = WEEKDAY_FA[WEEKDAY_KEYS[row.backup_weekday]]
+    await _answer(cq, f"✅ روز بکاپ هفتگی: {day}", show_alert=True)
+    await _render_backup_panel(cq, session, user)
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_interval"))
+async def admin_backup_interval(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    row = await BackupService(session).config()
+    await _edit(
+        cq, T.ADMIN_BACKUP_INTERVAL.format(interval=fa(row.backup_every_hours)),
+        kb.admin_backup_intervals(row.backup_every_hours),
+    )
+    await _answer(cq)
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_set_interval"))
+async def admin_backup_set_interval(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    service = BackupService(session)
+    row = await service.set_interval_hours(
+        callback_data.ref, actor_id=user.id if user else None
+    )
+    await session.commit()
+    await _answer(cq, f"✅ فاصله بکاپ: هر {fa(row.backup_every_hours)} ساعت", show_alert=True)
+    await _render_backup_panel(cq, session, user)
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_keep"))
+async def admin_backup_keep(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    row = await BackupService(session).config()
+    await _edit(
+        cq, T.ADMIN_BACKUP_KEEP.format(keep=fa(row.backup_keep)),
+        kb.admin_backup_keep(row.backup_keep),
+    )
+    await _answer(cq)
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_set_keep"))
+async def admin_backup_set_keep(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    service = BackupService(session)
+    row = await service.set_keep(callback_data.ref, actor_id=user.id if user else None)
+    await session.commit()
+    from ...services.backup import prune_backups
+
+    removed = prune_backups(settings.backup_dir, row.backup_keep)
+    await _answer(
+        cq,
+        f"✅ نگهداری روی {fa(row.backup_keep)} نسخه تنظیم شد."
+        + (f" ({fa(len(removed))} فایل قدیمی پاک شد)" if removed else ""),
+        show_alert=True,
+    )
+    await _render_backup_panel(cq, session, user)
+
+
+@router.callback_query(AdminCB.filter(F.action == "backup_history"))
+async def admin_backup_history(
+    cq: CallbackQuery, callback_data: AdminCB, session: AsyncSession,
+    user: User | None = None,
+) -> None:
+    _guard(cq, user)
+    service = BackupService(session)
+    rows = await service.backups.recent(PAGE)
+    total = await service.backups.count()
+    if not rows:
+        await _edit(cq, T.ADMIN_BACKUP_NO_HISTORY, kb.admin_backup_history())
+        await _answer(cq)
+        return
+    lines = [T.ADMIN_BACKUP_HISTORY.format(count=fa(total)), ""]
+    for entry in rows:
+        icon = "✅" if entry.status is BackupStatus.OK else "❌"
+        kind = "خودکار" if entry.trigger == "auto" else "دستی"
+        lines.append(
+            f"{icon} <code>{_backup_when(entry.at)}</code> · {kind}\n"
+            f"   <code>{entry.filename or '—'}</code>\n"
+            f"   {human_bytes(entry.size_bytes)} · {fa(entry.rows)} رکورد · "
+            f"{fa(entry.delivered)} ارسال"
+            + (f"\n   ⚠️ {(entry.error or '')[:120]}" if entry.error else "")
+        )
+    await _edit(cq, "\n".join(lines), kb.admin_backup_history(callback_data.page))
+    await _answer(cq)

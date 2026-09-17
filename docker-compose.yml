@@ -38,8 +38,15 @@ services:
       LOG_LEVEL: INFO
       TIMEZONE: Asia/Tehran
       RUN_MIGRATIONS_ON_START: "true"
+      BACKUP_DIR: /data/backups
+      BACKUP_AUTO_ENABLED: ${BACKUP_AUTO_ENABLED:-true}
+      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-daily}
+      BACKUP_HOUR: ${BACKUP_HOUR:-3}
+      BACKUP_KEEP: ${BACKUP_KEEP:-7}
+      BACKUP_CHAT_IDS: ${BACKUP_CHAT_IDS:-}
     volumes:
       - generated:/data/generated
+      - backups:/data/backups
     command: >
       sh -c "alembic upgrade head && python -m app.bot.main"
     restart: unless-stopped
@@ -48,3 +55,4 @@ volumes:
   pgdata:
   redisdata:
   generated:
+  backups:

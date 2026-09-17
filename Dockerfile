@@ -4,13 +4,20 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-    STORAGE_ROOT=/data/generated
+    STORAGE_ROOT=/data/generated \
+    BACKUP_DIR=/data/backups \
+    # The bot migrates its own schema at boot, so a first deploy can never come
+    # up against an empty database («relation "users" does not exist»).
+    RUN_MIGRATIONS_ON_START=true
 
 # libraqm → real HarfBuzz shaping for Persian in Pillow (hard requirement)
+# postgresql-client → pg_dump for the bot's own backup feature (the pure-Python
+# dumper is used automatically when the binary is missing)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libraqm0 libfribidi0 libharfbuzz0b \
         libjpeg62-turbo libfreetype6 libpng16-16 \
         fonts-dejavu-core ca-certificates \
+        postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -37,7 +44,7 @@ from app.rendering.html_renderer import HtmlRenderer
 print("raqm ok · assets ok · chromium:", HtmlRenderer.available())
 PY
 
-RUN mkdir -p /data/generated && chmod +x docker-entrypoint.sh
+RUN mkdir -p /data/generated /data/backups && chmod +x docker-entrypoint.sh
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import os,urllib.request,sys; p=os.getenv('PORT'); sys.exit(0) if not p else urllib.request.urlopen(f'http://127.0.0.1:{p}/health', timeout=5)"

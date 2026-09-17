@@ -74,6 +74,11 @@ class AdminCB(CallbackData, prefix="ad"):
 
     action: str          # home | advisors | students | system | bot | db | storage
                          # | stats | audit | settings | view | suspend | ask_* | do_*
+                         # | backup | backup_now | backup_send_last | backup_auto_*
+                         # | backup_sched | backup_set_sched | backup_hour
+                         # | backup_set_hour | backup_day | backup_set_day
+                         # | backup_interval | backup_set_interval
+                         # | backup_keep | backup_set_keep
     ref: int = 0
     page: int = 0
     arg: str = ""
@@ -337,6 +342,18 @@ AUDIT_ACTIONS_FA = {
     "storage.cleanup": "پاک‌سازی فایل‌ها",
     "access.approved": "تأیید درخواست دسترسی",
     "access.rejected": "رد درخواست دسترسی",
+    "backup.created": "بکاپ دستی",
+    "backup.auto": "بکاپ خودکار",
+    "backup.failed": "خطا در بکاپ‌گیری",
+    "backup.sent": "ارسال مجدد بکاپ",
+    "backup.auto_enabled": "فعال‌سازی بکاپ خودکار",
+    "backup.auto_disabled": "غیرفعال‌سازی بکاپ خودکار",
+    "backup.schedule_changed": "تغییر زمان‌بندی بکاپ",
+    "backup.hour_changed": "تغییر ساعت بکاپ",
+    "backup.weekday_changed": "تغییر روز بکاپ هفتگی",
+    "backup.interval_changed": "تغییر فاصله بکاپ",
+    "backup.retention_changed": "تغییر تعداد نسخه نگهداری",
+    "backup.recipients_changed": "تغییر گیرندگان بکاپ",
 }
 
 
@@ -631,6 +648,15 @@ GENERIC_ERROR = (
     "❌ انجام این کار با مشکل مواجه شد.\n"
     "لطفاً دوباره تلاش کنید؛ اگر تکرار شد با پشتیبانی تماس بگیرید."
 )
+SCHEMA_MISSING = (
+    "🛠 <b>ربات در حال آماده‌سازی پایگاه داده است</b>\n\n"
+    "جدول‌های پایگاه داده ساخته نشده‌اند (مهاجرت‌ها اجرا نشده).\n\n"
+    "اگر مدیر سیستم هستید، یکی از این کارها را انجام دهید:\n"
+    "• سرویس را یک‌بار ری‌استارت کنید — ربات هنگام بالا آمدن خودش "
+    "<code>alembic upgrade head</code> را اجرا می‌کند؛\n"
+    "• یا در ترمینال سرویس دستور <code>alembic upgrade head</code> را بزنید.\n\n"
+    "چند دقیقه دیگر دوباره /start را امتحان کنید."
+)
 ACCESS_DENIED = "⛔️ دسترسی به این بخش برای شما مجاز نیست."
 DRAFTS_EMPTY = "پیش‌نویسی وجود ندارد."
 HISTORY_EMPTY = "برنامه‌ای ثبت نشده است."
@@ -665,6 +691,132 @@ INVITE_SHARE = (
 INVITE_COPY_HINT = (
     "📋 لینک زیر را لمس کنید تا کپی شود:\n\n<code>{link}</code>"
 )
+
+
+
+# ─────────────────────────────── backups ────────────────────────────────────
+BACKUP_SCHEDULE_FA = {
+    "hourly": "⏰ هر ساعت",
+    "hours": "🔁 هر {n} ساعت",
+    "daily": "📅 روزانه · ساعت {hour}",
+    "weekly": "🗓 هفتگی · {day} ساعت {hour}",
+}
+BACKUP_STATUS_ON = "🟢 فعال"
+BACKUP_STATUS_OFF = "🔴 خاموش"
+ADMIN_BACKUP = (
+    "🗄 <b>بکاپ‌گیری پایگاه داده</b>\n\n"
+    "بکاپ خودکار: {status}\n"
+    "زمان‌بندی: {schedule}\n"
+    "گیرنده‌ها: {recipients}\n\n"
+    "<b>آخرین بکاپ</b>\n{last}\n\n"
+    "<b>وضعیت</b>\n"
+    "📦 نسخه‌های ثبت‌شده: {archives} ({size})\n"
+    "🧾 موفق: {ok} · ناموفق: {failed}\n"
+    "🗂 نگهداری: {keep} نسخه آخر\n"
+    "⏭ بکاپ بعدی: {next}\n"
+    "📁 مسیر: <code>{directory}</code>"
+)
+ADMIN_BACKUP_LAST_NONE = "   هنوز بکاپی گرفته نشده است."
+ADMIN_BACKUP_LAST_ROW = (
+    "   {icon} {when}\n"
+    "   <code>{filename}</code>\n"
+    "   {size} · {rows} رکورد · {tables} جدول · موتور {engine}\n"
+    "   ارسال برای {delivered} گیرنده"
+)
+ADMIN_BACKUP_LAST_FAILED = (
+    "   ❌ {when} — تلاش ناموفق\n"
+    "   <code>{error}</code>"
+)
+ADMIN_BACKUP_RUNNING = (
+    "⏳ <b>در حال تهیه بکاپ…</b>\n\n"
+    "۱) خواندن همه جدول‌های پایگاه داده\n"
+    "۲) ساخت فایل SQL قابل بازگردانی\n"
+    "۳) فشرده‌سازی و ارسال برای مدیر\n\n"
+    "چند لحظه صبر کنید؛ این پیام به‌روز می‌شود."
+)
+ADMIN_BACKUP_SENT = (
+    "✅ <b>بکاپ آماده و ارسال شد</b>\n\n"
+    "📦 <code>{filename}</code>\n"
+    "📏 {size} · 🧩 {rows} رکورد در {tables} جدول\n"
+    "⚙️ موتور: <code>{engine}</code> · ⏱ {seconds} ثانیه\n"
+    "📬 ارسال برای {delivered} گیرنده\n\n"
+    "برای بازگردانی، آرشیو را باز کنید و <code>restore.sh</code> را با "
+    "<code>DATABASE_URL</code> اجرا کنید."
+)
+ADMIN_BACKUP_NO_RECIPIENT = (
+    "⚠️ بکاپ ساخته شد ولی گیرنده‌ای برای ارسال پیدا نشد.\n\n"
+    "<code>ADMIN_IDS</code> یا <code>BACKUP_CHAT_IDS</code> را در متغیرهای محیطی سرویس تنظیم کنید."
+)
+ADMIN_BACKUP_FAILED = (
+    "❌ <b>بکاپ‌گیری ناموفق بود</b>\n\n<code>{error}</code>\n\n"
+    "هیچ فایلی ارسال نشد. دوباره تلاش کنید."
+)
+ADMIN_BACKUP_AUTO_ON = (
+    "🟢 بکاپ خودکار فعال شد.\n\n"
+    "زمان‌بندی: {schedule}\n"
+    "بکاپ بعدی: {next}\n"
+    "ارسال برای: {recipients}"
+)
+ADMIN_BACKUP_AUTO_OFF = (
+    "🔴 بکاپ خودکار خاموش شد.\n\n"
+    "از این پس فقط با دکمهٔ «🗄 بکاپ فوری» بکاپ گرفته می‌شود."
+)
+ADMIN_BACKUP_SCHED = (
+    "⏰ <b>زمان‌بندی بکاپ خودکار</b>\n\n"
+    "حالت فعلی: {current}\n"
+    "ساعت اجرا: {hour}\n"
+    "روز هفته (برای حالت هفتگی): {day}\n"
+    "فاصله (برای حالت ساعتی): {interval}\n\n"
+    "یک حالت را انتخاب کنید:"
+)
+ADMIN_BACKUP_HOUR = (
+    "🕐 <b>ساعت بکاپ</b>\n\n"
+    "ساعت فعلی: {hour} (به وقت تهران)\n\n"
+    "ساعت جدید را انتخاب کنید:"
+)
+ADMIN_BACKUP_DAY = (
+    "🗓 <b>روز بکاپ هفتگی</b>\n\n"
+    "روز فعلی: {day}\n\n"
+    "روز جدید را انتخاب کنید (شنبه = ۰):"
+)
+ADMIN_BACKUP_INTERVAL = (
+    "🔁 <b>فاصله بکاپ ساعتی</b>\n\n"
+    "فاصله فعلی: هر {interval} ساعت\n\n"
+    "فاصله جدید را انتخاب کنید:"
+)
+ADMIN_BACKUP_KEEP = (
+    "🗂 <b>تعداد نسخه‌های نگهداری</b>\n\n"
+    "فعلاً {keep} نسخه آخر روی دیسک و در تاریخچه نگه داشته می‌شود؛ "
+    "نسخه‌های قدیمی‌تر خودکار پاک می‌شوند.\n\n"
+    "مقدار جدید را انتخاب کنید:"
+)
+ADMIN_BACKUP_HISTORY = "🧾 <b>تاریخچه بکاپ‌ها</b> — {count} رکورد"
+ADMIN_BACKUP_NO_HISTORY = "🧾 <b>تاریخچه بکاپ‌ها</b>\n\nهنوز بکاپی ثبت نشده است."
+ADMIN_BACKUP_FILE_MISSING = (
+    "⚠️ فایل این بکاپ روی دیسک سرور نیست (احتمالاً پاک شده یا فضا "
+    "موقت بوده است).\n\n"
+    "برای دریافت نسخه تازه «🗄 بکاپ فوری» را بزنید."
+)
+ADMIN_BACKUP_SENT_AGAIN = "📬 آخرین بکاپ دوباره ارسال شد."
+GENERATED_NO_DELIVERY = (
+    "⚠️ برنامه ساخته شد، اما ارسال فایل به این چت ممکن نشد.\n"
+    "از «📜 برنامه‌های من» دوباره ارسالش کنید."
+)
+FILE_MISSING_ON_DISK = (
+    "فایل روی دیسک سرور نیست (ممکن است بعد از ری‌استارت پاک شده باشد).\n"
+    "یک بار دیگر «تولید برنامه» را بزنید تا از نو ساخته و ارسال شود."
+)
+SEND_FAILED = "❌ ارسال برنامه به دانش‌آموز ناموفق بود:\n{reason}"
+SENT_OK_NO_PDF = (
+    "✅ برنامه برای دانش‌آموز ارسال شد (نسخه PDF نرسید — دوباره امتحان کنید)."
+)
+
+PREVIEW_UNDELIVERED = (
+    "⚠️ پیش‌نمایش به‌صورت عکس ارسال نشد؛ از دکمه‌های زیر ادامه دهید."
+)
+
+BACKUP_CAPTION_MANUAL = "🗄 بکاپ دستی پایگاه داده · {when}"
+
 
 
 def day_fa(key: str) -> str:

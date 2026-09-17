@@ -22,7 +22,7 @@ __all__ = [
     "JalaliDate", "now_local", "today_local", "to_fa_digits", "to_en_digits",
     "apply_digit_style", "to_jalali", "jalali_short", "jalali_day_month",
     "week_label", "jalali_to_gregorian", "parse_jalali", "saturday_of",
-    "normalize_fa", "shape_rtl",
+    "normalize_fa", "shape_rtl", "jalali_datetime",
 ]
 
 
@@ -63,6 +63,21 @@ def jalali_day_month(value: date, digits: str = "fa") -> str:
 def week_label(start: date, end: date, digits: str = "fa") -> str:
     out = JalaliDate.range_label(start, end)
     return out if digits == "fa" else to_en_digits(out)
+
+
+def jalali_datetime(value: datetime | None = None, seconds: bool = True) -> str:
+    """«۱۴۰۵/۰۶/۲۶ - ۱۴:۳۲:۰۵» in Asia/Tehran — used for logs, captions, backups."""
+    from .calendar import TIMEZONE
+
+    moment = value or now_local()
+    if moment.tzinfo is None:
+        from datetime import timezone as _tz
+
+        moment = moment.replace(tzinfo=_tz.utc)
+    local = moment.astimezone(TIMEZONE)
+    stamp = JalaliDate.fa(JalaliDate.short(local.date()))
+    clock = "%H:%M:%S" if seconds else "%H:%M"
+    return f"{stamp} - {JalaliDate.fa(local.strftime(clock))}"
 
 
 def jalali_to_gregorian(year: int, month: int, day: int) -> date:

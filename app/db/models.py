@@ -269,3 +269,112 @@ class AuditLog(Base):
     plan_id: Mapped[int | None] = mapped_column(Integer, index=True)
     student_id: Mapped[int | None] = mapped_column(Integer, index=True)
     detail: Mapped[str | None] = mapped_column(Text)
+
+
+class BackupSchedule(str, enum.Enum):
+    """How often the bot backs itself up and mails the archive to the admin."""
+
+    HOURLY = "hourly"
+    HOURS = "hours"        # every `backup_every_hours` hours
+    DAILY = "daily"        # at `backup_hour` (Asia/Tehran)
+    WEEKLY = "weekly"      # on `backup_weekday` (0 = شنبه) at `backup_hour`
+
+
+class BotSettings(Base):
+    """Single-row runtime configuration the admin panel may change.
+
+    Everything here used to live in environment variables, which meant a
+    redeploy for every tweak. The row is created on demand with the values of
+    `settings` (the env defaults), so an existing deployment keeps behaving
+    exactly as before until an admin changes something in the panel.
+    """
+
+    __tablename__ = "bot_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    backup_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    backup_schedule: Mapped[BackupSchedule] = mapped_column(
+        Enum(BackupSchedule, native_enum=False),
+        default=BackupSchedule.DAILY,
+        nullable=False,
+    )
+    #: hour of day, Asia/Tehran (0-23) — used by `daily` and `weekly`
+    backup_hour: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    #: 0 = شنبه … 6 = جمعه — used by `weekly`
+    backup_weekday: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: used by `hours`
+    backup_every_hours: Mapped[int] = mapped_column(Integer, default=12, nullable=False)
+    #: how many archives are kept (on disk and in this table)
+    backup_keep: Mapped[int] = mapped_column(Integer, default=7, nullable=False)
+    #: comma separated Telegram chat ids; empty → every ADMIN_IDS entry
+    backup_recipients: Mapped[str | None] = mapped_column(Text)
+    backup_last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: set when an automatic run failed, cleared by the next successful one
+    backup_last_error: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    def recipient_list(self) -> list[int]:
+        """Explicit recipients, falling back to ADMIN_IDS from the environment."""
+        from ..config import settings
+
+        ids: list[int] = []
+        for chunk in (self.backup_recipients or "").replace(" ", "").split(","):
+            if chunk.lstrip("-").isdigit():
+                value = int(chunk)
+                if value not in ids:
+                    ids.append(value)
+        if ids:
+            return ids
+        explicit = list(settings.backup_chat_ids)
+        return explicit or list(settings.admin_ids)
+
+
+class BackupStatus(str, enum.Enum):
+    OK = "ok"
+    FAILED = "failed"
+
+
+class BackupLog(Base):
+    """One row per backup attempt — the panel shows the real history."""
+
+    __tablename__ = "backup_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True, nullable=False
+    )
+    #: automatic (scheduler) or manual (panel button / CLI)
+    trigger: Mapped[str] = mapped_column(String(16), default="manual", nullable=False)
+    status: Mapped[BackupStatus] = mapped_column(
+        Enum(BackupStatus, native_enum=False),
+        default=BackupStatus.OK,
+        nullable=False,
+        index=True,
+    )
+    filename: Mapped[str | None] = mapped_column(Text)
+    path: Mapped[str | None] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    tables: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    rows: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: "pg_dump" or "python"
+    engine: Mapped[str | None] = mapped_column(String(16))
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    recipients: Mapped[str | None] = mapped_column(Text)
+    #: how many admins actually received the archive
+    delivered: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    error: Mapped[str | None] = mapped_column(Text)
+    created_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+    @property
+    def human_size(self) -> str:
+        size = float(self.size_bytes or 0)
+        for unit in ("B", "KB", "MB"):
+            if size < 1024 or unit == "MB":
+                return f"{size:.1f} {unit}"
+            size /= 1024
+        return f"{size / 1024:.2f} GB"

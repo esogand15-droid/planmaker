@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # Startup sequence: verify runtime → migrate → run.
-# Usage: ./docker-entrypoint.sh [bot|migrate|shell|smoke]
+# Usage: ./docker-entrypoint.sh [bot|migrate|doctor|backup|shell|smoke]
 set -e
 
 echo "▶ Rotbe Land weekly planner · $(date -u +%FT%TZ)"
@@ -37,6 +37,14 @@ case "$MODE" in
     echo "▶ alembic upgrade head"
     exec alembic upgrade head
     ;;
+  doctor)
+    # schema/migration health report — the first thing to run after a bad deploy
+    exec python -m tools.manage doctor
+    ;;
+  backup)
+    # one archive in $BACKUP_DIR, no Telegram traffic (the bot does that itself)
+    exec python -m tools.backup "${@:2}"
+    ;;
   shell)
     exec /bin/sh
     ;;
@@ -44,11 +52,15 @@ case "$MODE" in
     exec python -m tools.smoke_test
     ;;
   bot)
-    # Migrations run in the release/pre-deploy step on Railway. Set
-    # RUN_MIGRATIONS_ON_START=true for single-service setups (compose, VPS).
-    if [ "${RUN_MIGRATIONS_ON_START:-false}" = "true" ]; then
+    # Migrations are ON by default now: a service that boots against an empty
+    # database used to answer every /start with «relation "users" does not exist».
+    # `app.bot.main` also re-checks the schema itself (alembic + verification +
+    # self-heal), so this step is a fast, visible belt-and-braces pass.
+    if [ "${RUN_MIGRATIONS_ON_START:-true}" = "true" ]; then
       echo "▶ alembic upgrade head"
       alembic upgrade head
+    else
+      echo "▶ RUN_MIGRATIONS_ON_START=false — skipping alembic (the app still verifies the schema)"
     fi
     echo "▶ starting bot (polling)"
     exec python -m app.bot.main

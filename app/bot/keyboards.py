@@ -618,13 +618,16 @@ def admin_menu() -> InlineKeyboardMarkup:
     kb.button(text="📋 مدیریت برنامه‌ها", callback_data=AdminCB(action="plans"))
     kb.button(text="📁 مدیریت فایل‌ها", callback_data=AdminCB(action="storage"))
     kb.button(text="🗄 پایگاه داده", callback_data=AdminCB(action="db"))
+    kb.button(text="🧰 بکاپ‌گیری", callback_data=AdminCB(action="backup"))
     kb.button(text="📊 آمار و گزارش‌ها", callback_data=AdminCB(action="stats"))
     kb.button(text="🧾 گزارش فعالیت‌ها", callback_data=AdminCB(action="audit"))
     kb.button(text="❤️ سلامت سیستم", callback_data=AdminCB(action="system"))
     kb.button(text="🤖 وضعیت ربات", callback_data=AdminCB(action="bot"))
     kb.button(text="⚙️ تنظیمات مدیریت", callback_data=AdminCB(action="settings"))
     kb.button(text="⬅️ پنل مشاور", callback_data=Nav(to="menu"))
-    kb.adjust(1, 1, 2, 2, 2, 2, 1)
+    # 13 buttons → 6 rows of 2 + 1 row of 1 (the old adjust() list added up to
+    # 12 and silently pushed the last button onto an extra row)
+    kb.adjust(*(2,) * 6, 1)
     return kb.as_markup()
 
 
@@ -930,4 +933,130 @@ def advisor_menu_with_admin() -> InlineKeyboardMarkup:
     kb.button(text="👨‍🏫 پروفایل من", callback_data=Nav(to="profile"))
     kb.button(text="🛠 پنل مدیریت", callback_data=AdminCB(action="home"))
     kb.adjust(2, 2, 2)
+    return kb.as_markup()
+
+# ─────────────────────────────── backups ────────────────────────────────────
+BACKUP_SCHEDULES = ("hourly", "hours", "daily", "weekly")
+BACKUP_SCHEDULE_FA = {
+    "hourly": "⏰ هر ساعت",
+    "hours": "🔁 هر چند ساعت",
+    "daily": "📅 روزانه (یک ساعت مشخص)",
+    "weekly": "🗓 هفتگی (یک روز و ساعت مشخص)",
+}
+BACKUP_HOURS = tuple(range(0, 24, 3))
+BACKUP_INTERVALS = (1, 3, 6, 12, 24)
+BACKUP_KEEP_VALUES = (3, 5, 7, 14, 30)
+
+
+def admin_backup(row, *, last_ok: bool, has_file: bool) -> InlineKeyboardMarkup:
+    """The backup control panel: run now, auto on/off, schedule, retention."""
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(
+        text="🗄 بکاپ فوری و ارسال",
+        callback_data=AdminCB(action="backup_now").pack()))
+    kb.row(InlineKeyboardButton(
+        text="🟢 فعال‌سازی بکاپ خودکار" if not row.backup_enabled else "🔴 خاموش کردن بکاپ خودکار",
+        callback_data=AdminCB(action="backup_auto_off" if row.backup_enabled
+                              else "backup_auto_on").pack()))
+    kb.row(InlineKeyboardButton(
+        text="⏰ زمان‌بندی", callback_data=AdminCB(action="backup_sched").pack()),
+        InlineKeyboardButton(
+        text="🕐 ساعت اجرا", callback_data=AdminCB(action="backup_hour").pack()))
+    kb.row(InlineKeyboardButton(
+        text="🗓 روز هفته", callback_data=AdminCB(action="backup_day").pack()),
+        InlineKeyboardButton(
+        text="🔁 فاصله ساعتی", callback_data=AdminCB(action="backup_interval").pack()))
+    kb.row(InlineKeyboardButton(
+        text=f"🗂 نگهداری {to_fa_digits(str(row.backup_keep))} نسخه",
+        callback_data=AdminCB(action="backup_keep").pack()),
+        InlineKeyboardButton(
+        text="🧾 تاریخچه", callback_data=AdminCB(action="backup_history").pack()))
+    if last_ok and has_file:
+        kb.row(InlineKeyboardButton(
+            text="📬 ارسال مجدد آخرین بکاپ",
+            callback_data=AdminCB(action="backup_send_last").pack()))
+    kb.row(InlineKeyboardButton(
+        text="🔄 به‌روزرسانی", callback_data=AdminCB(action="backup").pack()),
+        InlineKeyboardButton(
+        text="⬅️ پنل مدیریت", callback_data=AdminCB(action="home").pack()))
+    return kb.as_markup()
+
+
+def admin_backup_schedules(current: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for key in BACKUP_SCHEDULES:
+        label = BACKUP_SCHEDULE_FA[key]
+        if key == current:
+            label = f"✅ {label}"
+        kb.row(InlineKeyboardButton(
+            text=label,
+            callback_data=AdminCB(action="backup_set_sched", arg=key).pack()))
+    kb.row(InlineKeyboardButton(
+        text="⬅️ بازگشت", callback_data=AdminCB(action="backup").pack()))
+    return kb.as_markup()
+
+
+def admin_backup_hours(current: int) -> InlineKeyboardMarkup:
+    """Hour picker in Asia/Tehran; 3-hour steps keep the grid readable."""
+    kb = InlineKeyboardBuilder()
+    for hour in BACKUP_HOURS:
+        kb.button(
+            text=("✅ " if hour == current else "") + to_fa_digits(f"{hour:02d}:00"),
+            callback_data=AdminCB(action="backup_set_hour", ref=hour),
+        )
+    kb.adjust(*(4,) * (len(BACKUP_HOURS) // 4), len(BACKUP_HOURS) % 4 or 4)
+    kb.row(InlineKeyboardButton(
+        text="⬅️ بازگشت", callback_data=AdminCB(action="backup_sched").pack()))
+    return kb.as_markup()
+
+
+def admin_backup_days(current: int) -> InlineKeyboardMarkup:
+    from ..domain.models import WEEKDAY_FA, WEEKDAY_KEYS
+
+    kb = InlineKeyboardBuilder()
+    for index, key in enumerate(WEEKDAY_KEYS):
+        label = ("✅ " if index == current else "") + WEEKDAY_FA[key]
+        kb.button(text=label, callback_data=AdminCB(action="backup_set_day", ref=index))
+    kb.adjust(4, 3)
+    kb.row(InlineKeyboardButton(
+        text="⬅️ بازگشت", callback_data=AdminCB(action="backup_sched").pack()))
+    return kb.as_markup()
+
+
+def admin_backup_intervals(current: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for hours in BACKUP_INTERVALS:
+        kb.button(
+            text=("✅ " if hours == current else "")
+                 + f"هر {to_fa_digits(str(hours))} ساعت",
+            callback_data=AdminCB(action="backup_set_interval", ref=hours),
+        )
+    kb.adjust(2, 2, 1)
+    kb.row(InlineKeyboardButton(
+        text="⬅️ بازگشت", callback_data=AdminCB(action="backup_sched").pack()))
+    return kb.as_markup()
+
+
+def admin_backup_keep(current: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for keep in BACKUP_KEEP_VALUES:
+        kb.button(
+            text=("✅ " if keep == current else "")
+                 + f"{to_fa_digits(str(keep))} نسخه",
+            callback_data=AdminCB(action="backup_set_keep", ref=keep),
+        )
+    kb.adjust(3, 2)
+    kb.row(InlineKeyboardButton(
+        text="⬅️ بازگشت", callback_data=AdminCB(action="backup").pack()))
+    return kb.as_markup()
+
+
+def admin_backup_history(page: int = 0) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(
+        text="🔄 به‌روزرسانی", callback_data=AdminCB(action="backup_history", page=page).pack()))
+    kb.row(InlineKeyboardButton(
+        text="⬅️ بخش بکاپ", callback_data=AdminCB(action="backup").pack()),
+        InlineKeyboardButton(
+        text="🛠 پنل مدیریت", callback_data=AdminCB(action="home").pack()))
     return kb.as_markup()

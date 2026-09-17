@@ -14,6 +14,10 @@ from ..db.models import (
     AdvisorStudent,
     AssignmentDB,
     AuditLog,
+    BackupLog,
+    BackupSchedule,
+    BackupStatus,
+    BotSettings,
     PlanDayDB,
     PlanFile,
     PlanStatusDB,
@@ -75,8 +79,6 @@ class UserRepository:
         case) an invite token is generated instead; the student claims the
         account by opening the deep link.
         """
-        from ..domain.persian import now_local
-
         student = User(
             full_name=full_name.strip(),
             role=Role.STUDENT,
@@ -135,8 +137,6 @@ class UserRepository:
 
     async def claim_invite(self, student: User, telegram_id: int, username: str | None) -> User:
         """Bind a Telegram account to an advisor-created student row."""
-        from ..domain.persian import now_local  # noqa: F401  (kept for symmetry)
-
         duplicate = await self.by_telegram_id(telegram_id)
         if duplicate is not None and duplicate.id != student.id:
             # Only a plain, unused *student* row may be folded away. Advisors and
@@ -584,3 +584,128 @@ class AuditRepository:
     async def recent(self, limit: int = 20) -> list[AuditLog]:
         stmt = select(AuditLog).order_by(AuditLog.at.desc()).limit(limit)
         return list((await self.s.execute(stmt)).scalars())
+
+
+class SettingsRepository:
+    """The single `bot_settings` row: what the admin panel may change at runtime."""
+
+    def __init__(self, session: AsyncSession):
+        self.s = session
+
+    async def get(self) -> BotSettings:
+        row = (await self.s.execute(select(BotSettings).order_by(BotSettings.id).limit(1))).scalar_one_or_none()
+        if row is not None:
+            return row
+        from ..config import settings
+
+        row = BotSettings(
+            id=1,
+            backup_enabled=settings.backup_auto_enabled,
+            backup_schedule=_schedule_from(settings.backup_schedule),
+            backup_hour=min(23, max(0, settings.backup_hour)),
+            backup_weekday=min(6, max(0, settings.backup_weekday)),
+            backup_every_hours=max(1, settings.backup_every_hours),
+            backup_keep=max(1, settings.backup_keep),
+            backup_recipients=",".join(str(i) for i in settings.backup_chat_ids) or None,
+        )
+        self.s.add(row)
+        await self.s.flush()
+        return row
+
+
+def _schedule_from(value: str | None) -> BackupSchedule:
+    try:
+        return BackupSchedule((value or "daily").lower())
+    except ValueError:
+        return BackupSchedule.DAILY
+
+
+class BackupRepository:
+    """Backup history + retention bookkeeping."""
+
+    def __init__(self, session: AsyncSession):
+        self.s = session
+
+    async def record(
+        self,
+        *,
+        status: BackupStatus,
+        trigger: str = "manual",
+        filename: str | None = None,
+        path: str | None = None,
+        size_bytes: int = 0,
+        tables: int = 0,
+        rows: int = 0,
+        engine: str | None = None,
+        duration_ms: int = 0,
+        recipients: str | None = None,
+        delivered: int = 0,
+        sha256: str | None = None,
+        error: str | None = None,
+        created_by_id: int | None = None,
+    ) -> BackupLog:
+        row = BackupLog(
+            status=status,
+            trigger=trigger,
+            filename=filename,
+            path=path,
+            size_bytes=int(size_bytes or 0),
+            tables=int(tables or 0),
+            rows=int(rows or 0),
+            engine=engine,
+            duration_ms=int(duration_ms or 0),
+            recipients=recipients,
+            delivered=int(delivered or 0),
+            sha256=sha256,
+            error=(error or None) and str(error)[:2000],
+            created_by_id=created_by_id,
+        )
+        self.s.add(row)
+        await self.s.flush()
+        return row
+
+    async def latest(self, only_ok: bool = False) -> BackupLog | None:
+        stmt = select(BackupLog).order_by(BackupLog.at.desc(), BackupLog.id.desc()).limit(1)
+        if only_ok:
+            stmt = select(BackupLog).where(BackupLog.status == BackupStatus.OK)
+            stmt = stmt.order_by(BackupLog.at.desc(), BackupLog.id.desc()).limit(1)
+        return (await self.s.execute(stmt)).scalar_one_or_none()
+
+    async def latest_ok(self) -> BackupLog | None:
+        return await self.latest(only_ok=True)
+
+    async def recent(self, limit: int = 5) -> list[BackupLog]:
+        stmt = (
+            select(BackupLog)
+            .order_by(BackupLog.at.desc(), BackupLog.id.desc())
+            .limit(max(1, limit))
+        )
+        return list((await self.s.execute(stmt)).scalars())
+
+    async def count(self) -> int:
+        return int((await self.s.execute(select(func.count()).select_from(BackupLog))).scalar_one())
+
+    async def stats(self) -> dict:
+        """Aggregates for the panel: totals and the last success/failure."""
+        rows = (
+            await self.s.execute(
+                select(
+                    func.count(),
+                    func.coalesce(func.sum(BackupLog.size_bytes), 0),
+                ).where(BackupLog.status == BackupStatus.OK)
+            )
+        ).one()
+        failures = int(
+            (
+                await self.s.execute(
+                    select(func.count())
+                    .select_from(BackupLog)
+                    .where(BackupLog.status == BackupStatus.FAILED)
+                )
+            ).scalar_one()
+        )
+        return {"ok": int(rows[0] or 0), "bytes": int(rows[1] or 0), "failed": failures}
+
+    async def forget(self, row: BackupLog) -> None:
+        await self.s.delete(row)
+        await self.s.flush()

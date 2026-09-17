@@ -19,7 +19,6 @@ from ...domain.calendar import DateRangeError, JalaliDate
 from ...domain.persian import (
     to_en_digits,
     jalali_short,
-    parse_jalali,
     saturday_of,
     to_fa_digits,
     today_local,
@@ -37,6 +36,7 @@ from ..delivery import (
 )
 from .. import keyboards as kb
 from .. import texts as T
+from .. import ui
 from ..states import PlanFlow
 from ..texts import (
     AssignCB,
@@ -71,7 +71,7 @@ async def back_to_menu(cq: CallbackQuery, state: FSMContext, user: User) -> None
         cq, T.MAIN_MENU,
         kb.advisor_menu_with_admin() if admin else kb.advisor_menu(),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(Nav.filter(F.to == "new"))
@@ -109,7 +109,7 @@ async def _show_students(
     students, total = await _list_students(manager, user, query, page, size)
     if not students and not query:
         await _safe_edit(cq, T.NO_STUDENTS_EMPTY_STATE, kb.no_students(mode))
-        await cq.answer()
+        await _answer(cq)
         return
     title = T.STUDENTS_TITLE if mode == "card" else T.CHOOSE_STUDENT
     await _safe_edit(
@@ -117,7 +117,7 @@ async def _show_students(
         title.format(count=to_fa_digits(str(total))),
         kb.students_list(students, page, total, size, mode=mode),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(Nav.filter(F.to == "students"))
@@ -140,7 +140,7 @@ async def add_student_prompt(
         raise AccessDenied(T.ACCESS_DENIED)
     await state.set_state(PlanFlow.add_student)
     await _safe_edit(cq, T.ADD_STUDENT_PROMPT, kb.back_only("students"))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.message(PlanFlow.add_student, F.text)
@@ -193,8 +193,10 @@ async def _invite_link(bot, token: str | None) -> str:
     return f"https://t.me/{me.username}?start=inv_{token}"
 
 
-def _overview_text(plan: WeeklyPlanDB, manager: PlanManager) -> str:
-    domain = manager.to_domain(plan)
+def _overview_text(plan: WeeklyPlanDB, manager: PlanManager | None = None) -> str:
+    """Days-overview header. `to_domain` is a pure conversion, so a session
+    (and therefore a manager) is not needed when the plan is already loaded."""
+    domain = manager.to_domain(plan) if manager is not None else PlanManager.to_domain(plan)
     mode = "هفته تقویمی" if domain.is_calendar_week else "بازه دلخواه"
     return (
         f"<b>{T.HEADER}</b>\n\n"
@@ -215,12 +217,11 @@ async def _open_or_create(
     plan = await manager.create_plan(user, student_id, start, end)
     await state.set_state(PlanFlow.edit_day)
     await state.update_data(plan_id=plan.id, student_id=student_id)
-    await cq.message.edit_text(
-        _overview_text(plan, manager),
-        reply_markup=kb.days_overview(plan.id, PlanManager.to_domain(plan)),
-        parse_mode="HTML",
+    await _safe_edit(
+        cq, _overview_text(plan),
+        kb.days_overview(plan.id, PlanManager.to_domain(plan)),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(StudentCB.filter(F.action == "page"))
@@ -243,7 +244,7 @@ async def students_search(
     await state.update_data(mode=callback_data.mode)
     back = "students" if callback_data.mode == "card" else "new"
     await _safe_edit(cq, T.SEARCH_PROMPT, kb.back_only(back))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.message(PlanFlow.search_student, F.text)
@@ -281,12 +282,11 @@ async def student_picked(
     student = await manager.ensure_owns_student(user, callback_data.student_id)
     await state.set_state(PlanFlow.select_week)
     await state.update_data(student_id=student.id, student_name=student.full_name)
-    await cq.message.edit_text(
-        T.CHOOSE_WEEK.format(student=student.full_name),
-        reply_markup=kb.week_choices(student.id, saturday_of(today_local())),
-        parse_mode="HTML",
+    await _safe_edit(
+        cq, T.CHOOSE_WEEK.format(student=student.full_name),
+        kb.week_choices(student.id, saturday_of(today_local())),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(WeekCB.filter(F.action == "pick"))
@@ -306,7 +306,7 @@ async def week_custom(
     await state.set_state(PlanFlow.range_start)
     await state.update_data(student_id=callback_data.student_id, range_start=None)
     await _safe_edit(cq, T.RANGE_START_PROMPT, kb.back_only("new"))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.message(PlanFlow.range_start, F.text)
@@ -386,134 +386,16 @@ async def range_confirm(
     user: User, session: AsyncSession,
 ) -> None:
     data = await state.get_data()
-    start = date.fromisoformat(data["range_start"])
-    end = date.fromisoformat(data["range_end"])
-    await _open_or_create(
-        cq, state, user, session, callback_data.student_id or int(data["student_id"]),
-        start, end,
-    )
-
-
-async def _open_or_create(
-    cq: CallbackQuery, state: FSMContext, user: User, session: AsyncSession,
-    student_id: int, start: date, end: date | None = None,
-) -> None:
-    manager = PlanManager(session)
-    plan = await manager.create_plan(user, student_id, start, end)
-    await state.set_state(PlanFlow.edit_day)
-    await state.update_data(plan_id=plan.id, student_id=student_id)
-    await cq.message.edit_text(
-        _overview_text(plan, manager),
-        reply_markup=kb.days_overview(plan.id, PlanManager.to_domain(plan)),
-        parse_mode="HTML",
-    )
-    await cq.answer()
-
-
-@router.callback_query(StudentCB.filter(F.action == "page"))
-async def students_page(
-    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext,
-    user: User, session: AsyncSession,
-) -> None:
-    data = await state.get_data()
-    await _show_students(
-        cq, session, user, callback_data.page, data.get("query"),
-        mode=callback_data.mode,
-    )
-
-
-@router.callback_query(StudentCB.filter(F.action == "search"))
-async def students_search(
-    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext
-) -> None:
-    await state.set_state(PlanFlow.search_student)
-    await state.update_data(mode=callback_data.mode)
-    back = "students" if callback_data.mode == "card" else "new"
-    await _safe_edit(cq, T.SEARCH_PROMPT, kb.back_only(back))
-    await cq.answer()
-
-
-@router.message(PlanFlow.search_student, F.text)
-async def students_search_input(
-    message: Message, state: FSMContext, user: User, session: AsyncSession
-) -> None:
-    query = message.text.strip()
-    data = await state.get_data()
-    mode = data.get("mode", "pick")
-    await state.update_data(query=query)
-    await state.set_state(PlanFlow.select_student)
-    manager = PlanManager(session)
-    size = settings.students_page_size
-    students, total = await _list_students(manager, user, query, 0, size)
-    if not students:
-        await message.answer(
-            "نتیجه‌ای پیدا نشد.",
-            reply_markup=kb.back_only("students" if mode == "card" else "new"),
-        )
-        return
-    title = T.STUDENTS_TITLE if mode == "card" else T.CHOOSE_STUDENT
-    await message.answer(
-        title.format(count=to_fa_digits(str(total))),
-        reply_markup=kb.students_list(students, 0, total, size, mode=mode),
-        parse_mode="HTML",
-    )
-
-
-@router.callback_query(StudentCB.filter(F.action == "pick"))
-async def student_picked(
-    cq: CallbackQuery, callback_data: StudentCB, state: FSMContext,
-    user: User, session: AsyncSession,
-) -> None:
-    manager = PlanManager(session)
-    student = await manager.ensure_owns_student(user, callback_data.student_id)
-    await state.set_state(PlanFlow.select_week)
-    await state.update_data(student_id=student.id, student_name=student.full_name)
-    await cq.message.edit_text(
-        T.CHOOSE_WEEK.format(student=student.full_name),
-        reply_markup=kb.week_choices(student.id, saturday_of(today_local())),
-        parse_mode="HTML",
-    )
-    await cq.answer()
-
-
-@router.callback_query(WeekCB.filter(F.action == "pick"))
-async def week_picked(
-    cq: CallbackQuery, callback_data: WeekCB, state: FSMContext,
-    user: User, session: AsyncSession,
-) -> None:
-    start = saturday_of(today_local()) + timedelta(days=7 * callback_data.offset)
-    await _open_or_create(cq, state, user, session, callback_data.student_id, start)
-
-
-@router.callback_query(WeekCB.filter(F.action == "custom"))
-async def week_custom(cq: CallbackQuery, callback_data: WeekCB, state: FSMContext) -> None:
-    await state.set_state(PlanFlow.custom_week)
-    await state.update_data(student_id=callback_data.student_id)
-    await cq.message.edit_text(
-        T.CUSTOM_WEEK_PROMPT, reply_markup=kb.back_only("new"), parse_mode="HTML"
-    )
-    await cq.answer()
-
-
-@router.message(PlanFlow.custom_week, F.text)
-async def week_custom_input(
-    message: Message, state: FSMContext, user: User, session: AsyncSession
-) -> None:
-    data = await state.get_data()
     try:
-        start = parse_jalali(message.text)
-    except ValueError:
-        await message.answer(T.INVALID_DATE, parse_mode="HTML")
+        start = date.fromisoformat(data["range_start"])
+        end = date.fromisoformat(data["range_end"])
+        student_id = callback_data.student_id or int(data["student_id"])
+    except (KeyError, TypeError, ValueError):
+        # the wizard state was lost (bot restart / expired FSM storage)
+        await _safe_edit(cq, T.SESSION_EXPIRED, kb.back_only("new"))
+        await _answer(cq, T.SESSION_EXPIRED)
         return
-    manager = PlanManager(session)
-    plan = await manager.create_plan(user, int(data["student_id"]), start)
-    await state.set_state(PlanFlow.edit_day)
-    await state.update_data(plan_id=plan.id)
-    await message.answer(
-        _overview_text(plan, manager),
-        reply_markup=kb.days_overview(plan.id, PlanManager.to_domain(plan)),
-        parse_mode="HTML",
-    )
+    await _open_or_create(cq, state, user, session, student_id, start, end)
 
 
 def _connection_state(student: User) -> tuple[str, bool]:
@@ -575,7 +457,7 @@ async def student_card(
     manager = PlanManager(session)
     student = await manager.get_student(user, callback_data.student_id)
     await _render_student_card(cq, manager, student)
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(StudentCB.filter(F.action == "copylink"))
@@ -586,15 +468,13 @@ async def student_copy_link(
     manager = PlanManager(session)
     student = await manager.get_student(user, callback_data.student_id)
     if student.telegram_id or not student.invite_token:
-        await cq.answer("لینک فعالی وجود ندارد.", show_alert=True)
+        await _answer(cq, "لینک فعالی وجود ندارد.", show_alert=True)
         return
     link = await _invite_link(cq.bot, student.invite_token)
-    await cq.message.answer(
-        T.INVITE_COPY_HINT.format(link=link),
-        parse_mode="HTML",
-        disable_web_page_preview=True,
+    await ui.send_text_safe(
+        cq, T.INVITE_COPY_HINT.format(link=link), disable_web_page_preview=True
     )
-    await cq.answer("✅ لینک آماده کپی است.")
+    await _answer(cq, "✅ لینک آماده کپی است.")
 
 
 @router.callback_query(StudentCB.filter(F.action == "sharelink"))
@@ -605,15 +485,14 @@ async def student_share_link(
     manager = PlanManager(session)
     student = await manager.get_student(user, callback_data.student_id)
     if student.telegram_id or not student.invite_token:
-        await cq.answer("لینک فعالی وجود ندارد.", show_alert=True)
+        await _answer(cq, "لینک فعالی وجود ندارد.", show_alert=True)
         return
     link = await _invite_link(cq.bot, student.invite_token)
-    await cq.message.answer(
-        T.INVITE_SHARE.format(name=student.full_name, link=link),
-        parse_mode="HTML",
+    await ui.send_text_safe(
+        cq, T.INVITE_SHARE.format(name=student.full_name, link=link),
         disable_web_page_preview=True,
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(StudentCB.filter(F.action == "ask_invite"))
@@ -628,7 +507,7 @@ async def student_ask_new_invite(
         T.INVITE_REGENERATE_WARNING.format(name=student.full_name),
         kb.confirm_new_invite(student.id),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(StudentCB.filter(F.action == "unlink"))
@@ -642,10 +521,10 @@ async def student_unlink(
     manager = PlanManager(session)
     student = await manager.get_student(user, callback_data.student_id)
     if not is_admin(user, cq.from_user.id if cq.from_user else None):
-        await cq.answer("قطع اتصال فقط توسط مدیر انجام می‌شود.", show_alert=True)
+        await _answer(cq, "قطع اتصال فقط توسط مدیر انجام می‌شود.", show_alert=True)
         return
     student = await service.unlink_telegram(user, student.id)
-    await cq.answer(T.ADMIN_UNLINKED.format(name=student.full_name), show_alert=True)
+    await _answer(cq, T.ADMIN_UNLINKED.format(name=student.full_name), show_alert=True)
     await _render_student_card(cq, manager, student)
 
 
@@ -665,7 +544,7 @@ async def student_connect(
         T.CONNECT_MENU.format(name=student.full_name, status=status),
         kb.connect_menu(student),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(StudentCB.filter(F.action == "invite"))
@@ -676,21 +555,21 @@ async def student_invite(
     try:
         token, expires = await manager.new_invite(user, callback_data.student_id)
     except StudentError as exc:
-        await cq.answer(str(exc), show_alert=True)
+        await _answer(cq, str(exc), show_alert=True)
         return
     student = await manager.get_student(user, callback_data.student_id)
     link = await _invite_link(cq.bot, token)
-    await cq.message.answer(
+    await ui.send_text_safe(
+        cq,
         T.INVITE_READY.format(
             name=student.full_name, link=link,
             expires=JalaliDate.long(expires.date()),
         ),
         reply_markup=kb.invite_ready(student),
-        parse_mode="HTML",
         disable_web_page_preview=True,
     )
     await _render_student_card(cq, manager, student)   # refresh in place
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(StudentCB.filter(F.action == "revoke"))
@@ -700,7 +579,7 @@ async def student_revoke_invite(
     manager = PlanManager(session)
     await manager.revoke_invite(user, callback_data.student_id)
     student = await manager.get_student(user, callback_data.student_id)
-    await cq.answer(T.INVITE_REVOKED, show_alert=True)
+    await _answer(cq, T.INVITE_REVOKED, show_alert=True)
     await _render_student_card(cq, manager, student)
 
 
@@ -714,7 +593,7 @@ async def student_set_id_prompt(
     await state.set_state(PlanFlow.link_student)
     await state.update_data(student_id=student.id)
     await _safe_edit(cq, T.SET_TG_ID_PROMPT, kb.connect_menu(student))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.message(PlanFlow.link_student, F.text)
@@ -757,7 +636,7 @@ async def student_edit_prompt(
         T.EDIT_STUDENT_PROMPT.format(current=current),
         kb.back_only("students"),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.message(PlanFlow.edit_student, F.text)
@@ -796,13 +675,13 @@ async def student_this_week(
     start = saturday_of(today_local())
     plan = await manager.plans.find_by_week(student.id, start)
     if plan is None:
-        await cq.answer(T.NO_PLAN_THIS_WEEK)
+        await _answer(cq, T.NO_PLAN_THIS_WEEK)
         await _open_or_create(cq, state, user, session, student.id, start)
         return
     await state.update_data(plan_id=plan.id)
     await _safe_edit(cq, _overview_text(plan, manager),
                      kb.days_overview(plan.id, PlanManager.to_domain(plan)))
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(StudentCB.filter(F.action == "ask_del"))
@@ -819,7 +698,7 @@ async def student_ask_delete(
         T.CONFIRM_REMOVE_STUDENT.format(name=report.name, impact=impact),
         kb.confirm_remove_student(callback_data.student_id),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(StudentCB.filter(F.action == "del_confirm"))
@@ -835,7 +714,7 @@ async def student_confirm_delete(
         T.CONFIRM_REMOVE_STUDENT_FINAL.format(name=report.name),
         kb.confirm_remove_student(callback_data.student_id, final=True),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 def _impact_lines(report) -> str:
@@ -866,10 +745,10 @@ async def student_delete(
         raise
     except Exception:
         log.exception("student delete failed for %s", callback_data.student_id)
-        await cq.answer(T.STUDENT_REMOVE_FAILED, show_alert=True)
+        await _answer(cq, T.STUDENT_REMOVE_FAILED, show_alert=True)
         return
 
-    await cq.answer(T.STUDENT_REMOVED.format(name=report.name), show_alert=True)
+    await _answer(cq, T.STUDENT_REMOVED.format(name=report.name), show_alert=True)
     await state.update_data(query=None, mode="card")
     await _show_students(cq, session, user, page=0, query=None, mode="card")
 
@@ -889,6 +768,7 @@ async def show_days(
         _overview_text(plan, manager),
         kb.days_overview(plan.id, PlanManager.to_domain(plan)),
     )
+    await _answer(cq)
 
 
 @router.callback_query(DayCB.filter(F.action == "open"))
@@ -909,6 +789,7 @@ async def open_day(
         ),
         kb.day_editor(plan.id, domain, callback_data.day),
     )
+    await _answer(cq)
 
 
 @router.callback_query(DayCB.filter(F.action == "clear"))
@@ -927,7 +808,7 @@ async def clear_day(
         ),
         kb.day_editor(plan.id, domain, callback_data.day),
     )
-    await cq.answer("روز پاک شد.")
+    await _answer(cq, "روز پاک شد.")
 
 
 @router.callback_query(DayCB.filter(F.action == "copy"))
@@ -942,7 +823,7 @@ async def copy_day_prompt(
         kb.copy_day_targets(callback_data.plan_id, callback_data.day,
                             PlanManager.to_domain(plan)),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(DayCB.filter(F.action == "copyto"))
@@ -956,7 +837,7 @@ async def copy_day_apply(
         cq, _overview_text(plan, manager),
         kb.days_overview(plan.id, PlanManager.to_domain(plan)),
     )
-    await cq.answer(f"به {T.day_fa(callback_data.arg)} کپی شد.")
+    await _answer(cq, f"به {T.day_fa(callback_data.arg)} کپی شد.")
 
 
 @router.callback_query(PlanCB.filter(F.action == "copyweek"))
@@ -966,14 +847,14 @@ async def copy_previous_week(
     manager = PlanManager(session)
     count = await manager.copy_previous_week(user, callback_data.plan_id)
     if count == 0:
-        await cq.answer(T.NO_PREVIOUS_WEEK, show_alert=True)
+        await _answer(cq, T.NO_PREVIOUS_WEEK, show_alert=True)
         return
     plan = await manager.get_editable(user, callback_data.plan_id)
     await _safe_edit(
         cq, _overview_text(plan, manager),
         kb.days_overview(plan.id, PlanManager.to_domain(plan)),
     )
-    await cq.answer(T.COPIED_WEEK.format(count=to_fa_digits(str(count))))
+    await _answer(cq, T.COPIED_WEEK.format(count=to_fa_digits(str(count))))
 
 
 @router.callback_query(SlotCB.filter(F.action == "edit"))
@@ -990,17 +871,17 @@ async def edit_slot(
         plan_id=plan.id, day=callback_data.day, slot=callback_data.slot
     )
     current = f"\n\nمقدار فعلی:\n<code>{activity.summary()}</code>" if activity else ""
-    await cq.message.edit_text(
+    await _safe_edit(
+        cq,
         T.SLOT_PROMPT.format(
             slot=to_fa_digits(str(callback_data.slot + 1)), day=T.day_fa(callback_data.day)
         )
         + current,
-        reply_markup=kb.slot_editor(
+        kb.slot_editor(
             plan.id, callback_data.day, callback_data.slot, activity is not None
         ),
-        parse_mode="HTML",
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(SlotCB.filter(F.action == "clear"))
@@ -1021,7 +902,7 @@ async def clear_slot(
         ),
         kb.day_editor(plan.id, domain, callback_data.day),
     )
-    await cq.answer("خانه خالی شد.")
+    await _answer(cq, "خانه خالی شد.")
 
 
 @router.message(PlanFlow.edit_slot, F.text)
@@ -1083,12 +964,11 @@ async def open_assignments(
             for i, a in enumerate(sorted(domain.assignments, key=lambda x: x.order), 1)
         )
         current = f"\n\nتکالیف فعلی:\n{listed}"
-    await cq.message.edit_text(
-        T.ASSIGN_PROMPT + current,
-        reply_markup=kb.assignments_editor(plan.id, bool(domain.assignments)),
-        parse_mode="HTML",
+    await _safe_edit(
+        cq, T.ASSIGN_PROMPT + current,
+        kb.assignments_editor(plan.id, bool(domain.assignments)),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(AssignCB.filter(F.action == "clear"))
@@ -1102,7 +982,7 @@ async def clear_assignments(
         cq, _overview_text(plan, manager),
         kb.days_overview(plan.id, PlanManager.to_domain(plan)),
     )
-    await cq.answer("تکالیف پاک شد.")
+    await _answer(cq, "تکالیف پاک شد.")
 
 
 @router.message(PlanFlow.edit_assignments, F.text)
@@ -1140,18 +1020,22 @@ async def preview(
     domain = manager.to_domain(plan)
     report = await queue.validate(domain)
     if report.errors:
-        await cq.answer("\n".join(report.errors)[:200], show_alert=True)
+        await _answer(cq, "\n".join(report.errors)[:200], show_alert=True)
         return
-    await cq.answer(T.GENERATING)
+    await _answer(cq, T.GENERATING)
     png = await queue.preview(domain)
     caption = kb.plan_header(plan)
     if report.issues:
         caption += "\n\n⚠️ " + "\n⚠️ ".join(i.human() for i in report.issues[:3])
-    await cq.message.answer_photo(
-        BufferedInputFile(png, filename="preview.png"),
-        caption=caption,
-        reply_markup=kb.preview_actions(plan.id),
+    photo = await ui.send_photo_safe(
+        cq, BufferedInputFile(png, filename="preview.png"), caption=caption
     )
+    if photo is None:
+        # previews cannot carry buttons on a document — tell the advisor instead
+        await ui.send_text_safe(cq, T.PREVIEW_UNDELIVERED,
+                                reply_markup=kb.preview_actions(plan.id))
+        return
+    await _answer(cq)
 
 
 @router.callback_query(PlanCB.filter(F.action == "confirm"))
@@ -1168,7 +1052,7 @@ async def confirm(
         await _safe_edit(
             cq, T.NOT_READY.format(problems=problems), kb.confirm_actions(plan.id)
         )
-        await cq.answer()
+        await _answer(cq)
         return
     await _safe_edit(
         cq,
@@ -1182,7 +1066,7 @@ async def confirm(
         ),
         kb.confirm_actions(plan.id),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(PlanCB.filter(F.action.in_({"generate", "regenerate"})))
@@ -1195,7 +1079,7 @@ async def generate(
     domain = manager.to_domain(plan)
     force = callback_data.action == "regenerate"
 
-    await cq.answer(T.GENERATING)
+    await _answer(cq, T.GENERATING)
     result = await queue.generate(domain, force=force)
     await manager.plans.mark_generated(
         plan,
@@ -1216,20 +1100,38 @@ async def generate(
 
 
 async def _deliver(cq: CallbackQuery, plan: WeeklyPlanDB, png, pdf, caption: str) -> None:
-    photo_msg = await cq.message.answer_photo(FSInputFile(png), caption=caption)
+    """Send the finished plan: image, printable PDF, then the action buttons.
+
+    Every step tolerates a message the bot can no longer reply to
+    (`InaccessibleMessage`, cleared history, blocked chat): a plan that took
+    seconds to render must still reach the advisor, and a failure here must
+    never turn into «❌ انجام این کار با مشکل مواجه شد».
+    """
+    photo_msg = await ui.send_photo_safe(cq, FSInputFile(png), caption=caption)
+    if photo_msg is None:
+        # the chat refused photos (rare: media settings) — fall back to a file
+        photo_msg = await ui.send_document_safe(cq, FSInputFile(png), caption=caption)
     remember_file_id(plan, "png", photo_msg)
-    pdf_msg = await cq.message.answer_document(
-        FSInputFile(pdf), caption="📄 نسخه PDF (مناسب چاپ)"
+
+    pdf_msg = await ui.send_document_safe(
+        cq, FSInputFile(pdf), caption="📄 نسخه PDF (مناسب چاپ)"
     )
     remember_file_id(plan, "pdf", pdf_msg)
-    await cq.message.answer(
+
+    if photo_msg is None and pdf_msg is None:
+        log.warning("plan %s: could not deliver any file to chat %s", plan.id,
+                    getattr(cq.message, "chat", None))
+        await ui.edit_or_send(cq, T.GENERATED_NO_DELIVERY)
+        return
+
+    await ui.send_text_safe(
+        cq,
         T.GENERATED.format(
             student=plan.student.full_name,
             week=week_label(plan.week_start, plan.week_end),
             version=to_fa_digits(str(plan.version)),
         ),
         reply_markup=kb.generated_actions(plan.id, can_send=bool(plan.student.telegram_id)),
-        parse_mode="HTML",
     )
 
 
@@ -1242,18 +1144,26 @@ async def resend_file(
     plan = await manager.get_viewable(user, callback_data.plan_id)
     kind = "png" if callback_data.action == "png" else "pdf"
     if not plan.image_path and not plan.pdf_path:
-        await cq.answer("هنوز فایلی تولید نشده است.", show_alert=True)
+        await _answer(cq, "هنوز فایلی تولید نشده است.", show_alert=True)
         return
 
     await ensure_artifacts(session, plan, queue)  # ephemeral disk safety net
     file = input_for(plan, kind, queue.service.storage_root)
     if file is None:
-        await cq.answer(T.GENERIC_ERROR, show_alert=True)
+        await _answer(cq, T.FILE_MISSING_ON_DISK, show_alert=True)
         return
-    caption = kb.plan_header(plan) if kind == "png" else "📄 نسخه PDF"
-    sent = await cq.message.answer_document(file, caption=caption)
+    if kind == "png":
+        # a schedule is meant to be looked at, not downloaded: send it as a
+        # photo (previewable in chat) and only fall back to a document if the
+        # chat refuses media.
+        caption = kb.plan_header(plan)
+        sent = await ui.send_photo_safe(cq, file, caption=caption)
+        if sent is None:
+            sent = await ui.send_document_safe(cq, file, caption=caption)
+    else:
+        sent = await ui.send_document_safe(cq, file, caption="📄 نسخه PDF")
     remember_file_id(plan, kind, sent)
-    await cq.answer()
+    await _answer(cq)
 
 
 # ---------------------------------------------------------------- send ------
@@ -1264,7 +1174,7 @@ async def ask_send(
     manager = PlanManager(session)
     plan = await manager.get_editable(user, callback_data.plan_id)
     if not plan.student.telegram_id:
-        await cq.answer(T.STUDENT_NO_TELEGRAM, show_alert=True)
+        await _answer(cq, T.STUDENT_NO_TELEGRAM, show_alert=True)
         return
     await _safe_edit(
         cq,
@@ -1274,7 +1184,7 @@ async def ask_send(
         ),
         kb.send_confirm(plan.id),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(PlanCB.filter(F.action == "send"))
@@ -1285,31 +1195,59 @@ async def send_to_student(
     manager = PlanManager(session)
     plan = await manager.get_editable(user, callback_data.plan_id)
     if not plan.image_path or not plan.pdf_path:
-        await cq.answer("ابتدا برنامه را تولید کنید.", show_alert=True)
+        await _answer(cq, "ابتدا برنامه را تولید کنید.", show_alert=True)
         return
     if not plan.student.telegram_id:
-        await cq.answer(T.STUDENT_NO_TELEGRAM, show_alert=True)
+        await _answer(cq, T.STUDENT_NO_TELEGRAM, show_alert=True)
         return
 
     await ensure_artifacts(session, plan, queue)
     root = queue.service.storage_root
     png, pdf = input_for(plan, "png", root), input_for(plan, "pdf", root)
     if png is None or pdf is None:
-        await cq.answer(T.GENERIC_ERROR, show_alert=True)
+        await _answer(cq, T.GENERIC_ERROR, show_alert=True)
         return
 
     week = week_label(plan.week_start, plan.week_end)
-    sent_photo = await cq.bot.send_photo(
-        plan.student.telegram_id, png, caption=T.STUDENT_NEW_PLAN.format(week=week)
-    )
+    chat_id = plan.student.telegram_id
+    caption = T.STUDENT_NEW_PLAN.format(week=week)
+    try:
+        sent_photo = await cq.bot.send_photo(chat_id, png, caption=caption)
+    except Exception as exc:
+        log.warning("send_photo to student %s failed (%s) — sending as a file", chat_id, exc)
+        sent_photo = None
+    if sent_photo is None:
+        try:
+            sent_photo = await cq.bot.send_document(chat_id, png, caption=caption)
+        except Exception as exc:
+            await _answer(cq, T.SEND_FAILED.format(reason=_reason(exc)), show_alert=True)
+            return
     remember_file_id(plan, "png", sent_photo)
-    sent_pdf = await cq.bot.send_document(
-        plan.student.telegram_id, pdf, caption="📄 نسخه PDF"
-    )
+
+    try:
+        sent_pdf = await cq.bot.send_document(chat_id, pdf, caption="📄 نسخه PDF")
+    except Exception as exc:
+        log.warning("PDF delivery to student %s failed: %s", chat_id, exc)
+        sent_pdf = None
     remember_file_id(plan, "pdf", sent_pdf)
+
     await manager.mark_sent(user, plan)
-    await cq.message.answer(T.SENT_OK)
-    await cq.answer()
+    await ui.send_text_safe(
+        cq, T.SENT_OK if sent_pdf else T.SENT_OK_NO_PDF, reply_markup=None
+    )
+    await _answer(cq)
+
+
+def _reason(exc: BaseException) -> str:
+    """Short, safe reason for a delivery failure — never a raw stack."""
+    message = str(exc) or type(exc).__name__
+    if "bot was blocked" in message or "user is deactivated" in message:
+        return "دانش‌آموز ربات را مسدود کرده یا حسابش غیرفعال است."
+    if "chat not found" in message or "have no rights" in message:
+        return "چت دانش‌آموز در دسترس ربات نیست."
+    if "file is too big" in message:
+        return "حجم فایل از سقف تلگرام بیشتر است."
+    return message.split("\n")[0][:120]
 
 
 # ------------------------------------------------------ history / drafts ----
@@ -1369,7 +1307,7 @@ async def _render_list(
             else kb.back_only()
         )
         await _safe_edit(cq, empty, back)
-        await cq.answer()
+        await _answer(cq)
         return
 
     await _safe_edit(
@@ -1377,7 +1315,7 @@ async def _render_list(
         kb.plan_list(plans, page, total, size, kind=kind, ref=ref,
                      student_view=(kind == "mine")),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(PlanCB.filter(F.action == "versions"))
@@ -1388,14 +1326,14 @@ async def plan_versions(
     plan = await manager.get_viewable(user, callback_data.plan_id)
     files = await manager.plans.files_of(plan.id)
     if not files:
-        await cq.answer("نسخه‌ای ثبت نشده است.", show_alert=True)
+        await _answer(cq, "نسخه‌ای ثبت نشده است.", show_alert=True)
         return
     await _safe_edit(
         cq,
         f"🗂 <b>نسخه‌های تولیدشده</b>\n{kb.plan_header(plan)}",
         kb.versions_list(files, plan.id),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(FileCB.filter(F.action == "get"))
@@ -1406,21 +1344,21 @@ async def fetch_version_file(
     manager = PlanManager(session)
     record = await manager.plans.file_by_id(callback_data.file_id)
     if record is None:
-        await cq.answer("این نسخه دیگر موجود نیست.", show_alert=True)
+        await _answer(cq, "این نسخه دیگر موجود نیست.", show_alert=True)
         return
     plan = await manager.get_viewable(user, record.plan_id)  # authorization
     path = Path(record.image_path if callback_data.kind == "png" else record.pdf_path)
     if not is_inside_storage(path, queue.service.storage_root) or not path.exists():
-        await cq.answer(
+        await _answer(cq, 
             "فایل این نسخه روی سرور موجود نیست؛ می‌توانید دوباره تولید کنید.",
             show_alert=True,
         )
         return
-    await cq.message.answer_document(
-        FSInputFile(path),
+    await ui.send_document_safe(
+        cq, FSInputFile(path),
         caption=f"{kb.plan_header(plan)}\n🧩 نسخه {to_fa_digits(str(record.version))}",
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(PlanCB.filter(F.action == "open"))
@@ -1440,16 +1378,16 @@ async def open_plan(
             can_send=can_edit and bool(plan.student.telegram_id) and bool(plan.image_path),
         ),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(PlanCB.filter(F.action == "ask_delete"))
 async def ask_delete(cq: CallbackQuery, callback_data: PlanCB) -> None:
-    await cq.message.edit_text(
-        "این برنامه حذف شود؟ این کار قابل بازگشت نیست.",
-        reply_markup=kb.confirm_delete(callback_data.plan_id),
+    await _safe_edit(
+        cq, "این برنامه حذف شود؟ این کار قابل بازگشت نیست.",
+        kb.confirm_delete(callback_data.plan_id),
     )
-    await cq.answer()
+    await _answer(cq)
 
 
 @router.callback_query(PlanCB.filter(F.action == "delete"))
@@ -1461,7 +1399,7 @@ async def delete_plan(
     removed = await manager.delete_plan(user, callback_data.plan_id)
     await state.clear()
     await _safe_edit(cq, T.DELETED, kb.advisor_menu())
-    await cq.answer(f"{to_fa_digits(str(removed))} فایل هم پاک شد." if removed else None)
+    await _answer(cq, f"{to_fa_digits(str(removed))} فایل هم پاک شد." if removed else None)
 
 
 # ------------------------------------------------------------- utilities ----
@@ -1475,8 +1413,15 @@ async def quick_help(message: Message) -> None:
 
 
 async def _safe_edit(cq: CallbackQuery, text: str, markup) -> None:
-    """edit_text fails on identical content / photo messages — fall back to answer."""
-    try:
-        await cq.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
-    except Exception:
-        await cq.message.answer(text, reply_markup=markup, parse_mode="HTML")
+    """Edit the panel message, or send a fresh one when editing is impossible.
+
+    `cq.message` may be an InaccessibleMessage (buttons older than 48 h) and
+    edit_text also fails on identical content or on photo messages; both cases
+    used to surface as «❌ انجام این کار با مشکل مواجه شد».
+    """
+    await ui.edit_or_send(cq, text, markup)
+
+
+#: answering twice is normal in this panel (a handler re-renders another screen
+#: which answers as well) — `ui.answer` makes it a no-op instead of an exception.
+_answer = ui.answer

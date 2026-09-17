@@ -47,6 +47,28 @@ def _chromium_installed() -> bool:
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
+#: Containers (Railway, Docker, CI) usually run without a user namespace, and
+#: Chromium refuses to start its setuid sandbox there — the launch fails with a
+#: bare "Error" and the bot silently degrades to the Pillow renderer even though
+#: the browser is installed. These flags are the standard headless-container set.
+CHROMIUM_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--hide-scrollbars",
+    "--font-render-hinting=none",
+]
+
+
+def _launch(chromium, extra_args: list[str] | None = None):
+    """Launch Chromium with container-safe flags (plus any renderer extras)."""
+    args = list(CHROMIUM_ARGS)
+    for extra in extra_args or []:
+        if extra not in args:
+            args.append(extra)
+    return chromium.launch(args=args)
+
 FIT_SCRIPT = """
 () => {
   const overflow = [];
@@ -107,18 +129,19 @@ class HtmlRenderer(BaseRenderer):
             )
             return False
         # A present binary is not the same as a runnable one: a host may lack the
-        # shared libraries (libnspr4/libnss3…). Probe an actual launch once.
+        # shared libraries (libnspr4/libnss3…), or the container may refuse the
+        # setuid sandbox. Probe an actual launch once and say *why* it failed.
         try:
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as pw:
-                browser = pw.chromium.launch()
+                browser = _launch(pw.chromium)
                 browser.close()
         except Exception as exc:
             log.warning(
-                "Chromium present but not runnable (%s) — using the Pillow renderer. "
-                "Install the system libraries with: playwright install --with-deps chromium",
-                type(exc).__name__,
+                "Chromium present but not runnable (%s: %s) — using the Pillow "
+                "renderer. Fix with: python -m playwright install --with-deps chromium",
+                type(exc).__name__, str(exc).splitlines()[0][:200] if str(exc) else "-",
             )
             return False
         return True
@@ -210,7 +233,7 @@ class HtmlRenderer(BaseRenderer):
 
         html = self.build_html(plan)
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(args=["--font-render-hinting=none"])
+            browser = _launch(pw.chromium)
             page = browser.new_page(
                 viewport={"width": self.layout.width, "height": self.layout.height},
                 device_scale_factor=scale,
@@ -236,7 +259,7 @@ class HtmlRenderer(BaseRenderer):
 
         html = self.build_html(plan)
         with sync_playwright() as pw:
-            browser = pw.chromium.launch()
+            browser = _launch(pw.chromium)
             page = browser.new_page(
                 viewport={"width": self.layout.width, "height": self.layout.height}
             )

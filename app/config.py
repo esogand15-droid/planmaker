@@ -85,6 +85,39 @@ class Settings:
     health_port: int | None = field(
         default_factory=lambda: _int("PORT", 0) or None
     )
+    # ── schema bootstrap ────────────────────────────────────────────────────
+    # Migrations normally run in Railway's pre-deploy step. When they did not
+    # (first deploy, pre-deploy disabled, compose/VPS), the bot would start and
+    # every /start would fail with `relation "users" does not exist`. With this
+    # on (the default) the process brings its own schema up to date at boot.
+    run_migrations_on_start: bool = field(
+        default_factory=lambda: _bool("RUN_MIGRATIONS_ON_START", True)
+    )
+    #: last resort when Alembic itself cannot run (read-only role, broken
+    #: revision chain): create whatever table is missing straight from the ORM.
+    schema_autocreate: bool = field(default_factory=lambda: _bool("SCHEMA_AUTOCREATE", True))
+    # ── backups ─────────────────────────────────────────────────────────────
+    backup_dir: Path = field(
+        default_factory=lambda: Path(os.getenv("BACKUP_DIR", "/data/backups"))
+    )
+    #: seed value for the auto-backup row the first time the panel is opened
+    backup_auto_enabled: bool = field(default_factory=lambda: _bool("BACKUP_AUTO_ENABLED", True))
+    backup_schedule: str = field(default_factory=lambda: os.getenv("BACKUP_SCHEDULE", "daily"))
+    backup_hour: int = field(default_factory=lambda: _int("BACKUP_HOUR", 3))
+    backup_weekday: int = field(default_factory=lambda: _int("BACKUP_WEEKDAY", 0))
+    backup_every_hours: int = field(default_factory=lambda: _int("BACKUP_EVERY_HOURS", 12))
+    backup_keep: int = field(default_factory=lambda: _int("BACKUP_KEEP", 7))
+    #: where automatic backups are delivered; empty → every id in ADMIN_IDS
+    backup_chat_ids: tuple[int, ...] = field(
+        default_factory=lambda: tuple(
+            int(x) for x in os.getenv("BACKUP_CHAT_IDS", "").replace(" ", "").split(",")
+            if x.strip().lstrip("-").isdigit()
+        )
+    )
+    #: Telegram bots may upload up to 50 MB per document
+    backup_max_bytes: int = field(
+        default_factory=lambda: _int("BACKUP_MAX_BYTES", 50 * 1024 * 1024)
+    )
 
     @property
     def is_sqlite(self) -> bool:
@@ -120,6 +153,12 @@ class Settings:
             "timezone": self.timezone,
             "bot_token": mask_token(self.bot_token),
             "admins": str(len(self.admin_ids)),
+            "migrations_on_start": str(self.run_migrations_on_start),
+            "backup": (
+                f"{'auto' if self.backup_auto_enabled else 'manual'}"
+                f"/{self.backup_schedule}/keep={self.backup_keep}"
+            ),
+            "backup_dir": str(self.backup_dir),
         }
 
 

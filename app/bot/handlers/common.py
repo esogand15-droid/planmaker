@@ -18,6 +18,7 @@ from ...services.admin_service import AdminService
 from ...services.plan_manager import PlanManager
 from .. import keyboards as kb
 from .. import texts as T
+from .. import ui
 from ..texts import Nav
 
 log = logging.getLogger(__name__)
@@ -162,7 +163,7 @@ async def profile(
 ) -> None:
     """Each role sees only its own profile — no menu leakage between roles."""
     if user is None:
-        await cq.answer(T.NOT_REGISTERED, show_alert=True)
+        await ui.answer(cq, T.NOT_REGISTERED, show_alert=True)
         return
 
     manager = PlanManager(session)
@@ -172,7 +173,7 @@ async def profile(
             cq, T.STUDENT_MENU.format(name=user.full_name),
             kb.student_menu(latest is not None),
         )
-        await cq.answer()
+        await ui.answer(cq)
         return
 
     if user.role in (Role.ADVISOR, Role.ADMIN):
@@ -192,7 +193,7 @@ async def profile(
             ),
             kb.advisor_menu_with_admin() if admin else kb.advisor_menu(),
         )
-        await cq.answer()
+        await ui.answer(cq)
         return
 
     advisors = await manager.users.advisors_of(user.id)
@@ -209,16 +210,14 @@ async def profile(
         ),
         kb.profile_back(is_student=True),
     )
-    await cq.answer()
+    await ui.answer(cq)
 
 
 async def _safe_edit(cq: CallbackQuery, text: str, markup) -> None:
-    try:
-        await cq.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
-    except Exception:
-        await cq.message.answer(text, reply_markup=markup, parse_mode="HTML")
+    """Edit, or send a fresh message when the original one cannot be edited."""
+    await ui.edit_or_send(cq, text, markup)
 
 
 @router.callback_query(F.data == "noop")
 async def noop(cq: CallbackQuery) -> None:
-    await cq.answer()
+    await ui.answer(cq)

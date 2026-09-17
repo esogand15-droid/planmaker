@@ -6,8 +6,12 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-# Migrations run once per deploy, before the new instance takes traffic.
-preDeployCommand = ["alembic upgrade head"]
+# Migrations run twice on purpose: once here (before the new instance takes
+# traffic) and once inside the process at boot (RUN_MIGRATIONS_ON_START=true in
+# the Dockerfile). `alembic upgrade head` is idempotent, and the second pass is
+# what saves a first deploy where the pre-deploy step never ran — that case used
+# to produce `relation "users" does not exist` for every user.
+preDeployCommand = "alembic upgrade head"
 startCommand = "./docker-entrypoint.sh bot"
 
 # Telegram long-polling requires exactly ONE active instance.

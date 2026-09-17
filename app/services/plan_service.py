@@ -8,13 +8,11 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 
 from ..domain.models import PlanStatus, WeeklyPlan
 from ..domain.persian import today_local, week_label
 from ..rendering.base import BaseRenderer, OverflowIssue
-from ..rendering.base import BaseRenderer
 from ..rendering.factory import get_renderer
 from ..rendering.pdf import png_to_pdf
 
