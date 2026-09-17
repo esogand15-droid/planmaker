@@ -208,13 +208,6 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _async_dsn() -> str:
-    """The app's own DSN, normalised (libpq query args stripped)."""
-    from ..config import normalize_database_url
-
-    return normalize_database_url(settings.database_url)
-
-
 def _open_tar(path: Path) -> tarfile.TarFile:
     try:
         return tarfile.open(path, "r:gz")
@@ -660,6 +653,7 @@ class RestoreService:
             # Every pooled connection must be gone before TRUNCATE … CASCADE,
             # otherwise the load waits on our own sessions and deadlocks.
             await dispose_engine()
+            await self._terminate_other_pg_backends()
 
             executor = plan.executor
             try:
@@ -743,24 +737,19 @@ class RestoreService:
         if settings.is_sqlite:
             return await asyncio.to_thread(self._sqlite_executescript, sql)
 
-        from sqlalchemy.ext.asyncio import create_async_engine
-
-        engine = create_async_engine(_async_dsn())
         try:
-            # AUTOCOMMIT so the script's own BEGIN/COMMIT is what delimits the
-            # transaction — SQLAlchemy must not wrap it in another one.
-            async with engine.connect().execution_options(
-                isolation_level="AUTOCOMMIT"
-            ) as conn:
-                await asyncio.wait_for(
-                    conn.exec_driver_sql(sql), timeout=_SQL_TIMEOUT
-                )
+            import asyncpg
+
+            dsn = _libpq_url()
+            conn = await asyncpg.connect(dsn, timeout=30)
+            try:
+                await asyncio.wait_for(conn.execute(sql), timeout=_SQL_TIMEOUT)
+            finally:
+                await conn.close()
         except asyncio.TimeoutError:  # pragma: no cover
             return f"بارگذاری اسکریپ بعد از {_SQL_TIMEOUT} ثانیه ناتمام ماند."
         except Exception as exc:
             return f"{type(exc).__name__}: {exc}"[:800]
-        finally:
-            await engine.dispose()
         return None
 
     @staticmethod
@@ -779,6 +768,39 @@ class RestoreService:
         except Exception as exc:
             return f"{type(exc).__name__}: {exc}"[:800]
         return None
+
+    async def _terminate_other_pg_backends(self) -> int:
+        """Terminate other active connections to this database before a restore.
+
+        A pooled connection left open by a slow handler or concurrent update
+        holds an ACCESS SHARE lock on tables, which would cause TRUNCATE to wait
+        and deadlock all subsequent database connections.
+        """
+        if not settings.database_url.startswith("postgresql"):
+            return 0
+        try:
+            import asyncpg
+
+            dsn = _libpq_url()
+            conn = await asyncpg.connect(dsn, timeout=10)
+            try:
+                terminated = await conn.fetchval("""
+                    SELECT count(*) FROM (
+                        SELECT pg_terminate_backend(pid)
+                        FROM pg_stat_activity
+                        WHERE pid <> pg_backend_pid()
+                          AND datname = current_database()
+                    ) AS t;
+                """)
+                cnt = int(terminated or 0)
+                if cnt > 0:
+                    log.info("terminated %d background connection(s) prior to restore", cnt)
+                return cnt
+            finally:
+                await conn.close()
+        except Exception as exc:
+            log.warning("could not terminate backends prior to restore: %s", exc)
+            return 0
 
     async def _reinit(self) -> None:
         from ..db.session import get_engine, init_engine, wait_for_database
@@ -831,13 +853,19 @@ class RestoreService:
 
     async def _log_audit(self, action: str, actor_id: int | None, detail: str) -> None:
         """Write an audit row through a *fresh* session (the pool may be new)."""
+        from ..db.models import User
         from ..db.session import get_sessionmaker
         from ..repositories.repositories import AuditRepository
+        from sqlalchemy import select
 
         try:
             factory = self._factory or get_sessionmaker()
             async with factory() as session:
-                await AuditRepository(session).log(action, actor_id=actor_id, detail=detail)
+                valid_actor = None
+                if actor_id is not None:
+                    res = await session.execute(select(User.id).where(User.id == actor_id))
+                    valid_actor = res.scalar_one_or_none()
+                await AuditRepository(session).log(action, actor_id=valid_actor, detail=detail)
                 await session.commit()
         except Exception as exc:
             log.warning("could not write audit row %s: %s", action, exc)

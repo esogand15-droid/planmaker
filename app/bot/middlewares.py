@@ -14,12 +14,42 @@ from . import texts as T
 
 log = logging.getLogger(__name__)
 
+#: global in-memory flag: True while a restore is running, so updates from other
+#: users do not attempt to touch the database during TRUNCATE / reload.
+_restore_in_progress = False
+
+
+def set_restore_running(active: bool) -> None:
+    global _restore_in_progress
+    _restore_in_progress = bool(active)
+
+
+def is_restore_running() -> bool:
+    return _restore_in_progress
+
 
 class DatabaseMiddleware(BaseMiddleware):
     def __init__(self, sessionmaker: async_sessionmaker):
         self.sessionmaker = sessionmaker
 
     async def __call__(self, handler, event: TelegramObject, data: dict[str, Any]) -> Any:
+        # If a database restore is currently wiping/loading tables, short-circuit
+        # any incoming update that is NOT the restore confirmation button itself.
+        if _restore_in_progress:
+            payload = getattr(event, "data", None) or ""
+            if not payload.startswith("ad:backup_restore_do"):
+                if isinstance(event, CallbackQuery):
+                    try:
+                        await event.answer(T.ADMIN_RESTORE_IN_PROGRESS, show_alert=True)
+                    except Exception:
+                        pass
+                elif isinstance(event, Message):
+                    try:
+                        await event.answer(T.ADMIN_RESTORE_IN_PROGRESS)
+                    except Exception:
+                        pass
+                return None
+
         async with self.sessionmaker() as session:
             data["session"] = session
             try:

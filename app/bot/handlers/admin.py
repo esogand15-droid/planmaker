@@ -50,6 +50,7 @@ from ...services.render_queue import RenderQueue
 from .. import keyboards as kb
 from .. import texts as T
 from .. import ui
+from ..middlewares import is_restore_running, set_restore_running
 from ..texts import AdminCB
 
 log = logging.getLogger(__name__)
@@ -1763,11 +1764,6 @@ async def admin_backup_history(
 
 
 # ═══════════════════════ restore from an uploaded archive ═══════════════════
-#: a second restore while one is running would race the same tables; the flag is
-#: per-process, and the PostgreSQL advisory lock covers the multi-replica case
-_restore_running = False
-
-
 def _restore_root() -> Path:
     """Where uploaded archives are staged — inside BACKUP_DIR so one volume
     holds everything an operator may need after a disaster."""
@@ -1864,7 +1860,7 @@ async def admin_backup_restore_prompt(
 ) -> None:
     """Step 1 — ask for the archive and explain what will be checked."""
     _guard(cq, user)
-    if _restore_running:
+    if is_restore_running():
         await _answer(cq, T.ADMIN_RESTORE_IN_PROGRESS, show_alert=True)
         return
     await state.set_state(AdminFlow.backup_restore_file)
@@ -2000,12 +1996,10 @@ async def admin_backup_restore_run(
     state: FSMContext, user: User | None = None,
 ) -> None:
     """Step 3 — wipe the live database and load the archive."""
-    global _restore_running
-
     _guard(cq, user)
     actor_id = user.id if user else None
     telegram_id = cq.from_user.id if cq.from_user else None
-    if _restore_running:
+    if is_restore_running():
         await _answer(cq, T.ADMIN_RESTORE_IN_PROGRESS, show_alert=True)
         return
 
@@ -2045,7 +2039,7 @@ async def admin_backup_restore_run(
             cq, T.ADMIN_RESTORE_RUNNING.format(stage=stage), kb.admin_back("backup"))
 
     service = RestoreService()
-    _restore_running = True
+    set_restore_running(True)
     try:
         result = await service.restore(staged, actor_id=actor_id, progress=progress)
     except RestoreError as exc:
@@ -2064,7 +2058,7 @@ async def admin_backup_restore_run(
         await state.clear()
         return
     finally:
-        _restore_running = False
+        set_restore_running(False)
 
     # the middleware session is bound to an engine the restore disposed — drop it
     try:

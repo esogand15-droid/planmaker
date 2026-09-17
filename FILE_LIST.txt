@@ -1,50 +1,40 @@
-فهرست فایل‌های نهایی — رتبه لند v1.4.0 (بکاپ خودکار/دستی + ♻️ بازگردانی از بکاپ + ۱۲ باگ اصلاح‌شده)
-================================================================================
-این ZIP فقط شامل فایل‌هایی است که تغییر کرده یا اضافه شده‌اند؛ ساختار پوشه‌ها
-دقیقاً مثل مخزن است. محتوا را روی ریشه پروژه کپی کنید (overwrite) و بعد:
+Rotbe Land Planner v1.4.0 — تغییرات و اصلاحات نهایی
+==================================================
 
-    pip install -r requirements.txt
-    python -m tools.manage doctor
-    python -m tools.backup --status
-    python -m tools.backup --inspect backups/<archive>.tar.gz
-
-سپس سرویس را ری‌استارت کنید (RUN_MIGRATIONS_ON_START=true مهاجرت جدید را می‌زند).
-
-تعداد فایل‌ها: 36
-
-.dockerignore
-.env.example
-.gitignore
-/home/user/planmaker/.github/workflows/ci.yml
-DEPLOY.md
-Dockerfile
-Procfile
-VERSION
-app/__init__.py
-app/bot/handlers/admin.py
-app/bot/handlers/advisor.py
-app/bot/handlers/common.py
-app/bot/handlers/fallback.py
-app/bot/handlers/student.py
-app/bot/keyboards.py
-app/bot/main.py
-app/bot/middlewares.py
-app/bot/states.py
-app/bot/texts.py
-app/bot/ui.py
-app/config.py
-app/db/bootstrap.py
-app/db/models.py
-app/db/session.py
-app/domain/persian.py
-app/rendering/html_renderer.py
-app/repositories/repositories.py
-app/services/backup.py
-app/services/plan_service.py
-app/services/restore.py
-docker-compose.yml
-docker-entrypoint.sh
-migrations/versions/c1f4b7d20a11_backup_and_bot_settings.py
-railway.toml
-tools/backup.py
-tools/manage.py
+فهرست فایل‌های موجود در این پکیج:
+- .dockerignore
+- .env.example
+- .github/workflows/ci.yml
+- .gitignore
+- DEPLOY.md
+- Dockerfile
+- Procfile
+- VERSION
+- app/__init__.py
+- app/bot/handlers/admin.py
+- app/bot/handlers/advisor.py
+- app/bot/handlers/common.py
+- app/bot/handlers/fallback.py
+- app/bot/handlers/student.py
+- app/bot/keyboards.py
+- app/bot/main.py
+- app/bot/middlewares.py
+- app/bot/states.py
+- app/bot/texts.py
+- app/bot/ui.py
+- app/config.py
+- app/db/bootstrap.py
+- app/db/models.py
+- app/db/session.py
+- app/domain/persian.py
+- app/rendering/html_renderer.py
+- app/repositories/repositories.py
+- app/services/backup.py
+- app/services/plan_service.py
+- app/services/restore.py
+- docker-compose.yml
+- docker-entrypoint.sh
+- migrations/versions/c1f4b7d20a11_backup_and_bot_settings.py
+- railway.toml
+- tools/backup.py
+- tools/manage.py

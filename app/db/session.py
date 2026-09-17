@@ -38,7 +38,10 @@ def init_engine(url: str | None = None, echo: bool | None = None) -> AsyncEngine
             pool_timeout=30,
         )
     _engine = create_async_engine(dsn, **kwargs)
-    _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False, class_=AsyncSession)
+    if _sessionmaker is not None:
+        _sessionmaker.configure(bind=_engine)
+    else:
+        _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False, class_=AsyncSession)
     return _engine
 
 
